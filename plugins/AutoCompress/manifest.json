@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Oversized media → Catbox only (userhash required). v1.7",
+  "description": "Oversized media → bare Catbox URL (embeds/taps). v1.8",
   "authors": [
     {
       "name": "NickB926",

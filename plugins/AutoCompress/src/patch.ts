@@ -104,20 +104,18 @@ function purgePending(channelId?: string, media?: any) {
 
 async function sendLink(channelId: string | undefined, content: string) {
   const MessageSender = findByProps("sendMessage");
+  const payload = { content };
+
   if (channelId && MessageSender?.sendMessage) {
     try {
+      // Don't mark as silent / suppress embeds — we want Discord to unfurl the media URL.
       const nonce = Date.now().toString();
-      await MessageSender.sendMessage(
-        channelId,
-        { content },
-        void 0,
-        { nonce }
-      );
+      await MessageSender.sendMessage(channelId, payload, void 0, { nonce });
       return true;
     } catch (e) {
       console.warn("[AutoCompress] sendMessage failed:", e);
       try {
-        await MessageSender.sendMessage(channelId, { content });
+        await MessageSender.sendMessage(channelId, payload);
         return true;
       } catch {}
     }
@@ -181,11 +179,11 @@ async function externalFallback(
     return false;
   }
 
-  const name = snap.filename || "file";
-  const content = `[${name}](${result.link})`;
-  await sendLink(channelId, content);
+  // Bare URL only — markdown [name](url) kills embeds and often breaks taps on mobile.
+  const url = result.link.trim();
+  await sendLink(channelId, url);
   purgePending(channelId, media);
-  toast(`Sent via ${result.host}`, true);
+  toast(`Sent Catbox link`, true);
   return true;
 }
 

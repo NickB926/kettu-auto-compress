@@ -79,11 +79,12 @@ function parseCatboxResponse(
   text: string,
   status: number
 ): UploadResult {
-  const trimmed = (text || "").trim();
-  if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) {
-    return { link: trimmed, host: "catbox" };
+  const cleaned = cleanHostedUrl(text);
+  if (cleaned) {
+    return { link: cleaned, host: "catbox" };
   }
 
+  const trimmed = (text || "").trim();
   const lower = trimmed.toLowerCase();
   if (status === 412 || lower.includes("invalid uploader")) {
     return {
@@ -99,6 +100,31 @@ function parseCatboxResponse(
     host: "catbox",
     error: `Catbox HTTP ${status}: ${trimmed.slice(0, 140) || "empty"}`,
   };
+}
+
+/** Pull a usable HTTPS Catbox URL out of the API response. */
+export function cleanHostedUrl(raw: string): string | null {
+  if (!raw) return null;
+  // First token/line only — APIs sometimes append junk.
+  let u = String(raw)
+    .trim()
+    .split(/\r?\n/)[0]
+    .trim()
+    .replace(/^<|>$/g, "")
+    .replace(/[>"']+$/g, "");
+
+  if (!/^https?:\/\//i.test(u)) return null;
+  u = u.replace(/^http:\/\//i, "https://");
+
+  try {
+    const parsed = new URL(u);
+    const host = parsed.hostname.toLowerCase();
+    // Only trust Catbox hosts (files / litter / litterbox).
+    if (!host.endsWith("catbox.moe")) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }
 
 async function postFormData(
