@@ -103,16 +103,76 @@ function filePart(snap: FileSnapshot, filename: string, mime: string) {
   return { uri: snap.uri, name: filename, type: mime } as any;
 }
 
+const BROWSER_UA =
+  "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
+
 async function postForm(
   url: string,
   formData: FormData,
   headers?: Record<string, string>
-): Promise<{ text: string; status: number; url: string; json?: any }> {
+): Promise<{
+  text: string;
+  status: number;
+  url: string;
+  location?: string;
+  json?: any;
+}> {
+  const hdrs = {
+    "User-Agent": BROWSER_UA,
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    ...(headers || {}),
+  };
+
+  // Prefer XHR: responseURL reflects redirects (RN fetch often does not).
+  const viaXhr = await new Promise<{
+    text: string;
+    status: number;
+    url: string;
+    location?: string;
+    json?: any;
+  } | null>((resolve) => {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.timeout = 300_000;
+      for (const [k, v] of Object.entries(hdrs)) {
+        try {
+          xhr.setRequestHeader(k, v);
+        } catch {}
+      }
+      xhr.onload = () => {
+        const text = String(xhr.responseText ?? "");
+        let json: any;
+        try {
+          json = JSON.parse(text);
+        } catch {}
+        let location: string | undefined;
+        try {
+          location = xhr.getResponseHeader("Location") || undefined;
+        } catch {}
+        resolve({
+          text,
+          status: xhr.status,
+          url: xhr.responseURL || url,
+          location,
+          json,
+        });
+      };
+      xhr.onerror = () => resolve(null);
+      xhr.ontimeout = () =>
+        resolve({ text: "timeout", status: 0, url });
+      xhr.send(formData as any);
+    } catch {
+      resolve(null);
+    }
+  });
+  if (viaXhr) return viaXhr;
+
   try {
     const response = await fetch(url, {
       method: "POST",
       body: formData,
-      headers,
+      headers: hdrs,
       redirect: "follow",
     } as any);
     const text = await response.text();
@@ -124,42 +184,11 @@ async function postForm(
       text,
       status: response.status,
       url: (response as any).url || url,
+      location: response.headers?.get?.("Location") || undefined,
       json,
     };
-  } catch (fetchErr) {
-    return await new Promise((resolve) => {
-      try {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", url);
-        xhr.timeout = 300_000;
-        if (headers) {
-          for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
-        }
-        xhr.onload = () => {
-          const text = String(xhr.responseText ?? "");
-          let json: any;
-          try {
-            json = JSON.parse(text);
-          } catch {}
-          resolve({
-            text,
-            status: xhr.status,
-            url: xhr.responseURL || url,
-            json,
-          });
-        };
-        xhr.onerror = () =>
-          resolve({
-            text: `network error (${fetchErr})`,
-            status: 0,
-            url,
-          });
-        xhr.ontimeout = () => resolve({ text: "timeout", status: 0, url });
-        xhr.send(formData as any);
-      } catch (e: any) {
-        resolve({ text: String(e?.message ?? e), status: 0, url });
-      }
-    });
+  } catch (e: any) {
+    return { text: String(e?.message ?? e), status: 0, url };
   }
 }
 
@@ -254,22 +283,74 @@ function pickResolution(targetBytes: number): string {
 }
 
 function parseEzgifOutput(html: string): string | null {
+  // Real ezgif output uses CDN hosts like //s1.ezgif.com/tmp/… (not ezgif.com/tmp).
   const patterns = [
-    /href="((?:https?:)?\/\/ezgif\.com\/tmp\/[^"]+)"/i,
-    /href="(\/tmp\/[^"]+\.(?:mp4|webm|mov|mkv))"/i,
-    /src="((?:https?:)?\/\/ezgif\.com\/tmp\/[^"]+)"/i,
-    /"(https:\/\/ezgif\.com\/tmp\/[^"]+)"/i,
+    /src=["']((?:https?:)?\/\/s\d+\.ezgif\.com\/tmp\/[^"']+)["']/i,
+    /href=["']((?:https?:)?\/\/s\d+\.ezgif\.com\/tmp\/[^"']+)["']/i,
+    /src=["']((?:https?:)?\/\/(?:www\.)?ezgif\.com\/tmp\/[^"']+)["']/i,
+    /href=["']((?:https?:)?\/\/(?:www\.)?ezgif\.com\/tmp\/[^"']+)["']/i,
+    /((?:https?:)?\/\/s\d+\.ezgif\.com\/tmp\/[a-z0-9._-]+\.(?:mp4|webm|mov|mkv))/i,
+    /href=["'](\/tmp\/[^"']+\.(?:mp4|webm|mov|mkv))["']/i,
+    /src=["'](\/tmp\/[^"']+\.(?:mp4|webm|mov|mkv))["']/i,
   ];
   for (const re of patterns) {
     const m = html.match(re);
     if (m?.[1]) {
       let u = m[1];
       if (u.startsWith("//")) u = "https:" + u;
-      if (u.startsWith("/")) u = "https://ezgif.com" + u;
+      if (u.startsWith("/")) u = "https://s1.ezgif.com" + u;
       return cleanHostedUrl(u);
     }
   }
   return null;
+}
+
+function parseEzgifEditUrl(
+  finalUrl: string,
+  location: string | undefined,
+  html: string
+): string | null {
+  const candidates = [location, finalUrl];
+  for (const c of candidates) {
+    if (c && /ezgif\.com\/video-compressor\/[^\s"'<>]+/i.test(c)) {
+      const m = c.match(
+        /https?:\/\/(?:www\.)?ezgif\.com\/video-compressor\/[a-z0-9._-]+(?:\.html)?/i
+      );
+      if (m) return m[0].replace(/\.html$/i, "") + ".html";
+    }
+  }
+  const fromHtml = html.match(
+    /(?:https?:)?\/\/(?:www\.)?ezgif\.com\/video-compressor\/([a-z0-9._-]+)/i
+  );
+  if (fromHtml) {
+    const path = fromHtml[0].startsWith("http")
+      ? fromHtml[0]
+      : "https:" + fromHtml[0];
+    return path.replace(/\.html$/i, "") + ".html";
+  }
+  // Relative links on the edit page after a followed redirect
+  const rel = html.match(
+    /(?:action|href)=["']\/video-compressor\/([a-z0-9._-]+)/i
+  );
+  if (rel?.[1]) {
+    return `https://ezgif.com/video-compressor/${rel[1].replace(/\.html$/i, "")}.html`;
+  }
+  return null;
+}
+
+/** Stage via Litterbox so ezgif can import by URL (more reliable than RN file FormData). */
+async function stageToLitterbox(snap: FileSnapshot): Promise<string | null> {
+  const filename = withExtension(snap.filename || "upload", snap.mimeType);
+  const mime = normalizeMime(snap.mimeType, filename);
+  const form = new FormData();
+  form.append("reqtype", "fileupload");
+  form.append("time", "1h");
+  form.append("fileToUpload", filePart(snap, filename, mime));
+  const res = await postForm(
+    "https://litterbox.catbox.moe/resources/internals/api.php",
+    form
+  );
+  return cleanHostedUrl(res.text);
 }
 
 /** Unofficial ezgif form scrape — same site UI flow, no account. */
@@ -282,30 +363,45 @@ export async function compressWithEzgif(
   const bitrate = targetBitrateKbps(limit, snap.durationSecs);
   const resolution = pickResolution(limit);
 
-  // 1) Upload
-  const up = new FormData();
-  up.append("new-image", filePart(snap, filename, mime));
-
-  const first = await postForm("https://ezgif.com/video-compressor", up);
-  let redir = first.url || "";
-  if (!/ezgif\.com\/video-compressor\//i.test(redir)) {
-    // Sometimes body contains the edit URL
-    const m = first.text.match(
-      /https?:\/\/ezgif\.com\/video-compressor\/[a-z0-9-]+/i
-    );
-    if (m) redir = m[0];
+  // Prefer URL import: RN multipart file parts are flaky against ezgif.
+  let first: Awaited<ReturnType<typeof postForm>> | null = null;
+  let staged: string | null = null;
+  try {
+    staged = await stageToLitterbox(snap);
+  } catch (e) {
+    console.warn("[AutoCompress] litterbox stage failed:", e);
   }
-  if (!/ezgif\.com\/video-compressor\//i.test(redir)) {
+
+  if (staged) {
+    const up = new FormData();
+    up.append("new-image-url", staged);
+    up.append("upload", "Upload video!");
+    first = await postForm("https://ezgif.com/video-compressor", up);
+  }
+
+  // Fallback: direct file upload
+  if (
+    !first ||
+    !parseEzgifEditUrl(first.url, first.location, first.text)
+  ) {
+    const up = new FormData();
+    up.append("new-image", filePart(snap, filename, mime));
+    up.append("upload", "Upload video!");
+    first = await postForm("https://ezgif.com/video-compressor", up);
+  }
+
+  const redir = parseEzgifEditUrl(first.url, first.location, first.text);
+  if (!redir) {
     return {
       link: null,
       host: "ezgif",
-      error: `ezgif upload failed (HTTP ${first.status})`,
+      error: `ezgif upload failed (HTTP ${first.status}${staged ? ", staged" : ""})`,
     };
   }
 
   const id = redir.split("/").pop()!.replace(/\.html$/i, "");
 
-  // 2) Compress (ajax)
+  // 2) Compress (ajax) — output is on //sN.ezgif.com/tmp/…
   const form = new FormData();
   form.append("file", id);
   form.append("resolution", resolution);
@@ -316,17 +412,17 @@ export async function compressWithEzgif(
   const second = await postForm(`${redir}?ajax=true`, form);
   const outUrl = parseEzgifOutput(second.text);
   if (!outUrl) {
+    const hint = second.text.includes("File size")
+      ? " (got HTML but no media src)"
+      : "";
     return {
       link: null,
       host: "ezgif",
-      error: `ezgif compress failed (HTTP ${second.status})`,
+      error: `ezgif compress failed (HTTP ${second.status})${hint}`,
     };
   }
 
-  const cached = await cacheRemoteFile(
-    outUrl,
-    `ac_ezgif_${Date.now()}.mp4`
-  );
+  const cached = await cacheRemoteFile(outUrl, `ac_ezgif_${Date.now()}.mp4`);
   if (cached?.uri) {
     return {
       link: outUrl,
@@ -336,7 +432,6 @@ export async function compressWithEzgif(
     };
   }
 
-  // Link-only fallback if we couldn't cache locally
   return { link: outUrl, host: "ezgif" };
 }
 
