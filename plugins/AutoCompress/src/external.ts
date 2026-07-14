@@ -268,6 +268,37 @@ function targetBitrateKbps(targetBytes: number, durationSecs?: number): number {
   return Math.min(4000, Math.max(250, Math.floor(videoBps / 1000)));
 }
 
+/** Highest resolution that can look decent at this video bitrate. */
+function pickResolutionForBitrate(
+  bitrateKbps: number,
+  durationSecs: number
+): string {
+  if (bitrateKbps >= 1800 && durationSecs <= 15) return "1920x1080";
+  if (bitrateKbps >= 1800) return "1280x720";
+  if (bitrateKbps >= 900) return "854x480";
+  if (bitrateKbps >= 450) return "640x360";
+  return "426x240";
+}
+
+const RES_LADDER = [
+  "1920x1080",
+  "1280x720",
+  "854x480",
+  "640x360",
+  "426x240",
+  "320x240",
+] as const;
+
+function dropResolution(resolution: string): string {
+  const i = RES_LADDER.indexOf(resolution as (typeof RES_LADDER)[number]);
+  if (i < 0) return "426x240";
+  return RES_LADDER[Math.min(i + 1, RES_LADDER.length - 1)];
+}
+
+function clampBitrate(kbps: number): number {
+  return Math.min(4000, Math.max(150, Math.floor(kbps)));
+}
+
 function parseEzgifOutput(html: string): string | null {
   // Real ezgif output uses CDN hosts like //s1.ezgif.com/tmp/â€¦ (not ezgif.com/tmp).
   const patterns = [
@@ -446,7 +477,7 @@ async function ezgifRecompress(
   };
 }
 
-/** Upload â†’ wait load â†’ one-shot compress (one retry) â†’ download if under limit. */
+/** Upload → wait load → bitrate-first max quality under limit (max 3 ezgif jobs). */
 export async function compressWithEzgif(
   snap: FileSnapshot
 ): Promise<UploadResult> {
@@ -500,95 +531,126 @@ export async function compressWithEzgif(
     1,
     ready.durationSecs || snap.durationSecs || 40
   );
-  const aimBytes = Math.floor(limit * 0.9);
+  // Aim ~92% of the Discord budget so we fill quality without often overshooting.
+  const aimBytes = Math.floor(limit * 0.92);
 
-  const resolution =
-    durationSecs > 90
-      ? "426x240"
-      : durationSecs > 45
-        ? "640x360"
-        : durationSecs > 20
-          ? "854x480"
-          : "1280x720";
+  let bitrate = clampBitrate(targetBitrateKbps(aimBytes, durationSecs));
+  let resolution = pickResolutionForBitrate(bitrate, durationSecs);
 
-  let bitrate = targetBitrateKbps(aimBytes, durationSecs);
-  bitrate = Math.min(2000, Math.max(200, bitrate));
-
-  const attempts: Array<{ resolution: string; bitrate: number }> = [
-    { resolution, bitrate },
-    {
-      resolution:
-        resolution === "1280x720"
-          ? "854x480"
-          : resolution === "854x480"
-            ? "640x360"
-            : resolution === "640x360"
-              ? "426x240"
-              : "320x240",
-      bitrate: Math.max(150, Math.floor(bitrate * 0.5)),
-    },
-  ];
+  type Pass = {
+    url: string;
+    reported: number | null;
+  };
 
   let lastError = "ezgif compress failed";
   let lastUrl: string | null = null;
+  let jobs = 0;
+  const MAX_JOBS = 3;
 
-  for (let i = 0; i < attempts.length; i++) {
-    const pass = attempts[i];
-    const { outUrl, text, status } = await ezgifRecompress(
-      redir,
-      id,
-      pass.resolution,
-      pass.bitrate
-    );
-
+  async function recompress(res: string, br: number): Promise<Pass | null> {
+    if (jobs >= MAX_JOBS) return null;
+    jobs += 1;
+    const { outUrl, text, status } = await ezgifRecompress(redir, id, res, br);
     if (!outUrl) {
       lastError = `ezgif compress failed (HTTP ${status})`;
       await sleep(1500);
-      continue;
+      return null;
     }
     lastUrl = outUrl;
-
-    const reported = parseEzgifFileSizeBytes(text);
-    if (reported && reported > limit) {
-      if (i === 0) continue;
-      lastError = `still ${formatBytesSafe(reported)} after 2 passes`;
-      break;
-    }
-
-    const cached = await cacheRemoteFile(outUrl, `ac_ezgif_${Date.now()}.mp4`);
-    const size = cached?.size || reported || 0;
-
-    if (cached?.uri && (!size || size <= limit)) {
-      return {
-        link: outUrl,
-        host: "ezgif",
-        localUri: cached.uri,
-        localSize: size || reported || undefined,
-      };
-    }
-
-    if (cached?.uri && size > limit && i === 0) continue;
-
-    if (cached?.uri) {
-      return {
-        link: outUrl,
-        host: "ezgif",
-        localUri: cached.uri,
-        localSize: size,
-        error:
-          size > limit
-            ? `still ${formatBytesSafe(size)} after passes`
-            : undefined,
-      };
-    }
-
-    lastError = "ezgif OK but couldn't save into Discord cache";
+    return { url: outUrl, reported: parseEzgifFileSizeBytes(text) };
   }
 
-  if (lastUrl) {
-    return { link: lastUrl, host: "ezgif", error: lastError };
+  function isOver(p: Pass): boolean {
+    return p.reported != null && p.reported > limit;
   }
-  return { link: null, host: "ezgif", error: lastError };
+
+  function isUnder(p: Pass): boolean {
+    return p.reported == null || p.reported <= limit;
+  }
+
+  // Job 1 — bitrate budget first, then highest res that bitrate can feed.
+  let chosen = await recompress(resolution, bitrate);
+  if (!chosen) {
+    return lastUrl
+      ? { link: lastUrl, host: "ezgif", error: lastError }
+      : { link: null, host: "ezgif", error: lastError };
+  }
+
+  if (isOver(chosen)) {
+    // Job 2 — keep resolution, cut bitrate ~30%.
+    bitrate = clampBitrate(bitrate * 0.7);
+    const p2 = await recompress(resolution, bitrate);
+    if (p2 && isUnder(p2)) {
+      chosen = p2;
+    } else if (p2 && isOver(p2)) {
+      // Job 3 — drop one resolution step + recalc bitrate for budget.
+      resolution = dropResolution(resolution);
+      bitrate = clampBitrate(targetBitrateKbps(aimBytes, durationSecs));
+      const p3 = await recompress(resolution, bitrate);
+      if (p3) chosen = p3;
+      else if (p2) chosen = p2;
+    } else if (!p2) {
+      // keep chosen (over) as last resort link
+    }
+  } else if (
+    chosen.reported != null &&
+    chosen.reported < limit * 0.7 &&
+    jobs < MAX_JOBS
+  ) {
+    // Under with headroom — one quality-up pass; keep job 1 as fallback if upsell overshoots.
+    const baseline = chosen;
+    const upBitrate = clampBitrate(bitrate * 1.2);
+    const upRes = pickResolutionForBitrate(upBitrate, durationSecs);
+    // Don't drop resolution when filling quality.
+    const tryRes =
+      RES_LADDER.indexOf(upRes as (typeof RES_LADDER)[number]) <=
+      RES_LADDER.indexOf(resolution as (typeof RES_LADDER)[number])
+        ? upRes
+        : resolution;
+    const up = await recompress(tryRes, upBitrate);
+    if (up && isUnder(up)) {
+      chosen = up;
+    } else {
+      chosen = baseline;
+    }
+  }
+
+  // Download only the final under-limit candidate (once).
+  if (isOver(chosen) && chosen.reported != null) {
+    lastError = `still ${formatBytesSafe(chosen.reported)} after passes`;
+    return { link: chosen.url, host: "ezgif", error: lastError };
+  }
+
+  const cached = await cacheRemoteFile(
+    chosen.url,
+    `ac_ezgif_${Date.now()}.mp4`
+  );
+  const size = cached?.size || chosen.reported || 0;
+
+  if (cached?.uri && (!size || size <= limit)) {
+    return {
+      link: chosen.url,
+      host: "ezgif",
+      localUri: cached.uri,
+      localSize: size || chosen.reported || undefined,
+    };
+  }
+
+  if (cached?.uri) {
+    return {
+      link: chosen.url,
+      host: "ezgif",
+      localUri: cached.uri,
+      localSize: size,
+      error: `still ${formatBytesSafe(size)} after passes`,
+    };
+  }
+
+  return {
+    link: chosen.url,
+    host: "ezgif",
+    error: "ezgif OK but couldn't save into Discord cache",
+  };
 }
 
 function parseEzgifFileSizeBytes(html: string): number | null {

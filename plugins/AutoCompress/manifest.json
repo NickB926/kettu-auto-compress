@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Oversized videos → ezgif under 20MB → Discord. v2.5",
+  "description": "ezgif bitrate-first max quality under 20MB. v2.6",
   "authors": [
     {
       "name": "NickB926",
