@@ -35,7 +35,7 @@ const PROVIDERS: Provider[] = [
 ];
 
 const defaults: PluginConfig = {
-  maxMB: 24,
+  maxMB: 20,
   compressVideos: true,
   compressImages: true,
   blockOnFail: true,

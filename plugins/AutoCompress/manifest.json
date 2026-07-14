@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "ezgif wait-load-compress like the site, then Discord attach if under limit. v2.2",
+  "description": "ezgif: lower res/bitrate until under 20MB, then Discord attach. v2.3",
   "authors": [
     {
       "name": "NickB926",

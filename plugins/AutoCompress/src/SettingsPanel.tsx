@@ -68,19 +68,19 @@ export default function SettingsPanel() {
 
   useProxy(storage);
 
-  const [draft, setDraft] = React.useState(() => String(storage.maxMB ?? 24));
+  const [draft, setDraft] = React.useState(() => String(storage.maxMB ?? 20));
   const focused = React.useRef(false);
   const provider = (storage.provider as Provider) || "ezgif";
 
   React.useEffect(() => {
     if (focused.current) return;
-    setDraft(String(storage.maxMB ?? 24));
+    setDraft(String(storage.maxMB ?? 20));
   }, [storage.maxMB]);
 
   const commitDraft = () => {
     const n = parseMB(draft);
     if (n == null) {
-      setDraft(String(storage.maxMB ?? 24));
+      setDraft(String(storage.maxMB ?? 20));
       return;
     }
     if (storage.maxMB !== n) storage.maxMB = n;

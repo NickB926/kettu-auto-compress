@@ -527,89 +527,137 @@ export async function compressWithEzgif(
   }
 
   const durationSecs = ready.durationSecs || snap.durationSecs;
-  const passes: Array<{ resolution: string; bitrate: number }> = [
-    {
-      resolution: pickResolution(limit),
-      bitrate: targetBitrateKbps(limit, durationSecs),
-    },
-    { resolution: "640x360", bitrate: 600 },
-    { resolution: "640x360", bitrate: 400 },
-    { resolution: "426x240", bitrate: 250 },
+
+  // Simple loop: lower bitrate, then resolution, until under limit (default 20MB).
+  const resolutions = [
+    "1280x720",
+    "854x480",
+    "640x360",
+    "426x240",
+    "320x240",
   ];
+  // Start from a bitrate that aims at the limit, then step down.
+  const startBitrate = Math.min(
+    2500,
+    Math.max(400, targetBitrateKbps(limit, durationSecs))
+  );
+  const bitrates = [
+    startBitrate,
+    Math.floor(startBitrate * 0.7),
+    Math.floor(startBitrate * 0.5),
+    400,
+    300,
+    200,
+    150,
+  ].filter((v, i, a) => v >= 150 && a.indexOf(v) === i);
 
   let lastError = "ezgif compress failed";
   let best: { url: string; localUri?: string; localSize?: number } | null =
     null;
 
-  for (let pi = 0; pi < passes.length; pi++) {
-    const { resolution, bitrate } = passes[pi];
-    onProgress?.(
-      `Compressing on ezgif (${resolution}, ${bitrate}kbps)${
-        pi ? ` — pass ${pi + 1}` : ""
-      }…`
-    );
-
-    const { outUrl, text, status } = await ezgifRecompress(
-      redir,
-      id,
-      resolution,
-      bitrate
-    );
-
-    if (!outUrl) {
-      lastError = `ezgif compress failed (HTTP ${status})`;
-      if (/error|too large|failed/i.test(text)) {
-        lastError += `: ${text.replace(/<[^>]+>/g, " ").slice(0, 80)}`;
-      }
-      await sleep(2500);
-      continue;
-    }
-
-    onProgress?.("Downloading compressed video…");
-    const cached = await cacheRemoteFile(outUrl, `ac_ezgif_${Date.now()}.mp4`);
-    const size = cached?.size || 0;
-
-    if (cached?.uri && size > 0 && size <= limit) {
+  for (const resolution of resolutions) {
+    for (const bitrate of bitrates) {
       onProgress?.(
-        `ezgif done — ${formatBytesSafe(size)} (under ${Math.round(
+        `ezgif: ${resolution} @ ${bitrate}kbps → try ≤${Math.round(
           limit / MB
-        )}MB)`
+        )}MB…`
       );
-      return {
-        link: outUrl,
-        host: "ezgif",
-        localUri: cached.uri,
-        localSize: size,
-      };
-    }
 
-    if (cached?.uri) {
-      best = { url: outUrl, localUri: cached.uri, localSize: size || undefined };
-      onProgress?.(
-        size
-          ? `Still ${formatBytesSafe(size)} — compressing smaller…`
-          : "Got file; compressing smaller…"
+      const { outUrl, text, status } = await ezgifRecompress(
+        redir,
+        id,
+        resolution,
+        bitrate
       );
-    } else {
-      best = { url: outUrl };
-      lastError = "ezgif OK but couldn't save file into Discord cache";
+
+      if (!outUrl) {
+        lastError = `ezgif compress failed (HTTP ${status})`;
+        await sleep(1500);
+        continue;
+      }
+
+      // Prefer size from ezgif HTML so we can skip download when still too big.
+      const reported = parseEzgifFileSizeBytes(text);
+      if (reported && reported > limit) {
+        onProgress?.(
+          `Got ${formatBytesSafe(reported)} — still over, lowering…`
+        );
+        best = { url: outUrl, localSize: reported };
+        continue;
+      }
+
+      onProgress?.("Downloading compressed video…");
+      const cached = await cacheRemoteFile(
+        outUrl,
+        `ac_ezgif_${Date.now()}.mp4`
+      );
+      const size = cached?.size || reported || 0;
+
+      if (cached?.uri && size > 0 && size <= limit) {
+        onProgress?.(
+          `Under ${Math.round(limit / MB)}MB — ${formatBytesSafe(size)}`
+        );
+        return {
+          link: outUrl,
+          host: "ezgif",
+          localUri: cached.uri,
+          localSize: size,
+        };
+      }
+
+      if (cached?.uri) {
+        best = {
+          url: outUrl,
+          localUri: cached.uri,
+          localSize: size || undefined,
+        };
+        onProgress?.(
+          size
+            ? `Still ${formatBytesSafe(size)} — lowering…`
+            : "Got file; lowering…"
+        );
+      } else {
+        best = { url: outUrl, localSize: reported || undefined };
+        lastError = "ezgif OK but couldn't save into Discord cache";
+      }
     }
   }
 
+  if (best?.localUri && best.localSize && best.localSize <= limit) {
+    return {
+      link: best.url,
+      host: "ezgif",
+      localUri: best.localUri,
+      localSize: best.localSize,
+    };
+  }
   if (best?.localUri) {
     return {
       link: best.url,
       host: "ezgif",
       localUri: best.localUri,
       localSize: best.localSize,
-      error:
-        best.localSize && best.localSize > limit
-          ? `still ${formatBytesSafe(best.localSize)} after ezgif`
-          : undefined,
+      error: `still ${formatBytesSafe(best.localSize || 0)} after lowering res/bitrate`,
     };
   }
   if (best?.url) return { link: best.url, host: "ezgif", error: lastError };
   return { link: null, host: "ezgif", error: lastError };
+}
+
+function parseEzgifFileSizeBytes(html: string): number | null {
+  // e.g. File size: <strong>401.96KiB</strong> or 12.3 MiB / MB
+  const m = html.match(
+    /File size:\s*<strong>\s*([\d.]+)\s*(KiB|KB|MiB|MB|GiB|GB|B)\s*<\/strong>/i
+  );
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const unit = m[2].toUpperCase();
+  if (unit === "B") return Math.round(n);
+  if (unit === "KIB" || unit === "KB") return Math.round(n * 1024);
+  if (unit === "MIB" || unit === "MB") return Math.round(n * 1024 * 1024);
+  if (unit === "GIB" || unit === "GB") return Math.round(n * 1024 * 1024 * 1024);
+  return null;
 }
 
 /** FreeConvert official API — needs Bearer access token. */
