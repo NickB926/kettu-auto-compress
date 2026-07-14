@@ -526,121 +526,128 @@ export async function compressWithEzgif(
     };
   }
 
-  const durationSecs = ready.durationSecs || snap.durationSecs;
-
-  // Simple loop: lower bitrate, then resolution, until under limit (default 20MB).
-  const resolutions = [
-    "1280x720",
-    "854x480",
-    "640x360",
-    "426x240",
-    "320x240",
-  ];
-  // Start from a bitrate that aims at the limit, then step down.
-  const startBitrate = Math.min(
-    2500,
-    Math.max(400, targetBitrateKbps(limit, durationSecs))
+  const durationSecs = Math.max(
+    1,
+    ready.durationSecs || snap.durationSecs || 40
   );
-  const bitrates = [
-    startBitrate,
-    Math.floor(startBitrate * 0.7),
-    Math.floor(startBitrate * 0.5),
-    400,
-    300,
-    200,
-    150,
-  ].filter((v, i, a) => v >= 150 && a.indexOf(v) === i);
+  const targetMB = Math.round(limit / MB);
+  // Aim a bit under the limit so Discord accepts it.
+  const aimBytes = Math.floor(limit * 0.9);
+
+  // One resolution from clip length, one bitrate from aimBytes / duration.
+  // Then at most one smaller retry — not an endless grid.
+  const resolution =
+    durationSecs > 90
+      ? "426x240"
+      : durationSecs > 45
+        ? "640x360"
+        : durationSecs > 20
+          ? "854x480"
+          : "1280x720";
+
+  let bitrate = targetBitrateKbps(aimBytes, durationSecs);
+  // Floor/ceil within what ezgif accepts usefully.
+  bitrate = Math.min(2000, Math.max(200, bitrate));
+
+  const attempts: Array<{ resolution: string; bitrate: number }> = [
+    { resolution, bitrate },
+    // One backup: half bitrate + one step lower res if first pass is still big.
+    {
+      resolution:
+        resolution === "1280x720"
+          ? "854x480"
+          : resolution === "854x480"
+            ? "640x360"
+            : resolution === "640x360"
+              ? "426x240"
+              : "320x240",
+      bitrate: Math.max(150, Math.floor(bitrate * 0.5)),
+    },
+  ];
 
   let lastError = "ezgif compress failed";
-  let best: { url: string; localUri?: string; localSize?: number } | null =
-    null;
+  let lastUrl: string | null = null;
 
-  for (const resolution of resolutions) {
-    for (const bitrate of bitrates) {
-      onProgress?.(
-        `ezgif: ${resolution} @ ${bitrate}kbps → try ≤${Math.round(
-          limit / MB
-        )}MB…`
-      );
+  for (let i = 0; i < attempts.length; i++) {
+    const pass = attempts[i];
+    onProgress?.(
+      i === 0
+        ? `ezgif one-shot: ${pass.resolution} @ ${pass.bitrate}kbps (aim ≤${targetMB}MB)…`
+        : `Still over ${targetMB}MB — one smaller pass (${pass.resolution} @ ${pass.bitrate}kbps)…`
+    );
 
-      const { outUrl, text, status } = await ezgifRecompress(
-        redir,
-        id,
-        resolution,
-        bitrate
-      );
+    const { outUrl, text, status } = await ezgifRecompress(
+      redir,
+      id,
+      pass.resolution,
+      pass.bitrate
+    );
 
-      if (!outUrl) {
-        lastError = `ezgif compress failed (HTTP ${status})`;
-        await sleep(1500);
-        continue;
-      }
-
-      // Prefer size from ezgif HTML so we can skip download when still too big.
-      const reported = parseEzgifFileSizeBytes(text);
-      if (reported && reported > limit) {
-        onProgress?.(
-          `Got ${formatBytesSafe(reported)} — still over, lowering…`
-        );
-        best = { url: outUrl, localSize: reported };
-        continue;
-      }
-
-      onProgress?.("Downloading compressed video…");
-      const cached = await cacheRemoteFile(
-        outUrl,
-        `ac_ezgif_${Date.now()}.mp4`
-      );
-      const size = cached?.size || reported || 0;
-
-      if (cached?.uri && size > 0 && size <= limit) {
-        onProgress?.(
-          `Under ${Math.round(limit / MB)}MB — ${formatBytesSafe(size)}`
-        );
-        return {
-          link: outUrl,
-          host: "ezgif",
-          localUri: cached.uri,
-          localSize: size,
-        };
-      }
-
-      if (cached?.uri) {
-        best = {
-          url: outUrl,
-          localUri: cached.uri,
-          localSize: size || undefined,
-        };
-        onProgress?.(
-          size
-            ? `Still ${formatBytesSafe(size)} — lowering…`
-            : "Got file; lowering…"
-        );
-      } else {
-        best = { url: outUrl, localSize: reported || undefined };
-        lastError = "ezgif OK but couldn't save into Discord cache";
-      }
+    if (!outUrl) {
+      lastError = `ezgif compress failed (HTTP ${status})`;
+      await sleep(1500);
+      continue;
     }
+    lastUrl = outUrl;
+
+    const reported = parseEzgifFileSizeBytes(text);
+    if (reported && reported > limit) {
+      onProgress?.(
+        `Result ${formatBytesSafe(reported)} — over ${targetMB}MB` +
+          (i === 0 ? ", retrying once…" : "")
+      );
+      // Don't download oversized results; only retry on first failure.
+      if (i === 0) continue;
+      lastError = `still ${formatBytesSafe(reported)} after 2 passes`;
+      break;
+    }
+
+    // Only download when ezgif says it's under (or size unknown on last try).
+    onProgress?.("Downloading final video (once)…");
+    const cached = await cacheRemoteFile(
+      outUrl,
+      `ac_ezgif_${Date.now()}.mp4`
+    );
+    const size = cached?.size || reported || 0;
+
+    if (cached?.uri && (!size || size <= limit)) {
+      onProgress?.(
+        `Ready — ${formatBytesSafe(size || reported || 0)} ≤${targetMB}MB`
+      );
+      return {
+        link: outUrl,
+        host: "ezgif",
+        localUri: cached.uri,
+        localSize: size || reported || undefined,
+      };
+    }
+
+    if (cached?.uri && size > limit && i === 0) {
+      onProgress?.(
+        `Downloaded ${formatBytesSafe(size)} — still over, one smaller pass…`
+      );
+      continue;
+    }
+
+    if (cached?.uri) {
+      return {
+        link: outUrl,
+        host: "ezgif",
+        localUri: cached.uri,
+        localSize: size,
+        error:
+          size > limit
+            ? `still ${formatBytesSafe(size)} after passes`
+            : undefined,
+      };
+    }
+
+    lastError = "ezgif OK but couldn't save into Discord cache";
   }
 
-  if (best?.localUri && best.localSize && best.localSize <= limit) {
-    return {
-      link: best.url,
-      host: "ezgif",
-      localUri: best.localUri,
-      localSize: best.localSize,
-    };
+  if (lastUrl) {
+    return { link: lastUrl, host: "ezgif", error: lastError };
   }
-  if (best?.localUri) {
-    return {
-      link: best.url,
-      host: "ezgif",
-      localUri: best.localUri,
-      localSize: best.localSize,
-      error: `still ${formatBytesSafe(best.localSize || 0)} after lowering res/bitrate`,
-    };
-  }
-  if (best?.url) return { link: best.url, host: "ezgif", error: lastError };
   return { link: null, host: "ezgif", error: lastError };
 }
 

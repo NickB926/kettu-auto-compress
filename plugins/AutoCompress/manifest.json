@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "ezgif: lower res/bitrate until under 20MB, then Discord attach. v2.3.1",
+  "description": "ezgif one-shot under 20MB (one retry max), then Discord attach. v2.4",
   "authors": [
     {
       "name": "NickB926",
