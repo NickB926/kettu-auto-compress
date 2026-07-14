@@ -353,20 +353,139 @@ async function stageToLitterbox(snap: FileSnapshot): Promise<string | null> {
   return cleanHostedUrl(res.text);
 }
 
-/** Unofficial ezgif form scrape — same site UI flow, no account. */
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function formatBytesSafe(bytes: number): string {
+  if (!bytes) return "?";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < MB) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / MB).toFixed(1)} MB`;
+}
+
+async function getText(
+  url: string
+): Promise<{ text: string; status: number; url: string }> {
+  try {
+    const xhrResult = await new Promise<{
+      text: string;
+      status: number;
+      url: string;
+    } | null>((resolve) => {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", url);
+        xhr.timeout = 120_000;
+        try {
+          xhr.setRequestHeader("User-Agent", BROWSER_UA);
+        } catch {}
+        xhr.onload = () =>
+          resolve({
+            text: String(xhr.responseText ?? ""),
+            status: xhr.status,
+            url: xhr.responseURL || url,
+          });
+        xhr.onerror = () => resolve(null);
+        xhr.ontimeout = () => resolve({ text: "timeout", status: 0, url });
+        xhr.send();
+      } catch {
+        resolve(null);
+      }
+    });
+    if (xhrResult) return xhrResult;
+  } catch {}
+
+  const res = await fetch(url, {
+    headers: { "User-Agent": BROWSER_UA },
+  } as any);
+  return {
+    text: await res.text(),
+    status: res.status,
+    url: (res as any).url || url,
+  };
+}
+
+/** Same as opening the tool page and waiting for the video preview to finish loading. */
+async function waitForEzgifReady(
+  editUrl: string,
+  onProgress?: (msg: string) => void
+): Promise<{ ok: boolean; durationSecs?: number; html: string }> {
+  let lastHtml = "";
+  for (let i = 0; i < 30; i++) {
+    onProgress?.(
+      i === 0
+        ? "Waiting for ezgif to load the video…"
+        : `Still waiting for ezgif load… (${i + 1})`
+    );
+    const page = await getText(editUrl);
+    lastHtml = page.text || "";
+    const ready =
+      /name="bitrate"/i.test(lastHtml) &&
+      (/<video[\s>]/i.test(lastHtml) ||
+        /filestats/i.test(lastHtml) ||
+        /source\s+src=/i.test(lastHtml) ||
+        /Recompress video/i.test(lastHtml));
+    if (ready && page.status >= 200 && page.status < 400) {
+      const lengthMatch = lastHtml.match(
+        /length:\s*(\d{1,2}):(\d{2}):(\d{2})/i
+      );
+      let durationSecs: number | undefined;
+      if (lengthMatch) {
+        durationSecs =
+          parseInt(lengthMatch[1], 10) * 3600 +
+          parseInt(lengthMatch[2], 10) * 60 +
+          parseInt(lengthMatch[3], 10);
+      }
+      await sleep(1500);
+      return { ok: true, durationSecs, html: lastHtml };
+    }
+    await sleep(2000);
+  }
+  return { ok: false, html: lastHtml };
+}
+
+async function ezgifRecompress(
+  editUrl: string,
+  fileId: string,
+  resolution: string,
+  bitrate: number
+): Promise<{ outUrl: string | null; text: string; status: number }> {
+  const form = new FormData();
+  form.append("file", fileId);
+  form.append("resolution", resolution);
+  form.append("bitrate", String(bitrate));
+  form.append("format", "mp4");
+  // Match the site's "Recompress video!" button field.
+  form.append("video-compressor", "Recompress video!");
+  form.append("ajax", "true");
+
+  const second = await postForm(`${editUrl}?ajax=true`, form);
+  return {
+    outUrl: parseEzgifOutput(second.text),
+    text: second.text,
+    status: second.status,
+  };
+}
+
+/**
+ * Unofficial ezgif scrape — mirrors: upload → wait for load → pick settings →
+ * click Recompress → download. Multi-pass until Discord size limit.
+ */
 export async function compressWithEzgif(
-  snap: FileSnapshot
+  snap: FileSnapshot,
+  onProgress?: (msg: string) => void
 ): Promise<UploadResult> {
   const filename = withExtension(snap.filename || "upload", snap.mimeType);
   const mime = normalizeMime(snap.mimeType, filename);
   const limit = maxBytes();
-  const bitrate = targetBitrateKbps(limit, snap.durationSecs);
-  const resolution = pickResolution(limit);
 
-  // Prefer URL import: RN multipart file parts are flaky against ezgif.
+  onProgress?.("Uploading to ezgif…");
+
   let first: Awaited<ReturnType<typeof postForm>> | null = null;
   let staged: string | null = null;
   try {
+    onProgress?.("Staging file (Litterbox → ezgif URL)…");
     staged = await stageToLitterbox(snap);
   } catch (e) {
     console.warn("[AutoCompress] litterbox stage failed:", e);
@@ -379,11 +498,8 @@ export async function compressWithEzgif(
     first = await postForm("https://ezgif.com/video-compressor", up);
   }
 
-  // Fallback: direct file upload
-  if (
-    !first ||
-    !parseEzgifEditUrl(first.url, first.location, first.text)
-  ) {
+  if (!first || !parseEzgifEditUrl(first.url, first.location, first.text)) {
+    onProgress?.("Uploading file directly to ezgif…");
     const up = new FormData();
     up.append("new-image", filePart(snap, filename, mime));
     up.append("upload", "Upload video!");
@@ -401,38 +517,99 @@ export async function compressWithEzgif(
 
   const id = redir.split("/").pop()!.replace(/\.html$/i, "");
 
-  // 2) Compress (ajax) — output is on //sN.ezgif.com/tmp/…
-  const form = new FormData();
-  form.append("file", id);
-  form.append("resolution", resolution);
-  form.append("bitrate", String(bitrate));
-  form.append("format", "mp4");
-  form.append("ajax", "true");
-
-  const second = await postForm(`${redir}?ajax=true`, form);
-  const outUrl = parseEzgifOutput(second.text);
-  if (!outUrl) {
-    const hint = second.text.includes("File size")
-      ? " (got HTML but no media src)"
-      : "";
+  const ready = await waitForEzgifReady(redir, onProgress);
+  if (!ready.ok) {
     return {
       link: null,
       host: "ezgif",
-      error: `ezgif compress failed (HTTP ${second.status})${hint}`,
+      error: "ezgif never finished loading the video",
     };
   }
 
-  const cached = await cacheRemoteFile(outUrl, `ac_ezgif_${Date.now()}.mp4`);
-  if (cached?.uri) {
+  const durationSecs = ready.durationSecs || snap.durationSecs;
+  const passes: Array<{ resolution: string; bitrate: number }> = [
+    {
+      resolution: pickResolution(limit),
+      bitrate: targetBitrateKbps(limit, durationSecs),
+    },
+    { resolution: "640x360", bitrate: 600 },
+    { resolution: "640x360", bitrate: 400 },
+    { resolution: "426x240", bitrate: 250 },
+  ];
+
+  let lastError = "ezgif compress failed";
+  let best: { url: string; localUri?: string; localSize?: number } | null =
+    null;
+
+  for (let pi = 0; pi < passes.length; pi++) {
+    const { resolution, bitrate } = passes[pi];
+    onProgress?.(
+      `Compressing on ezgif (${resolution}, ${bitrate}kbps)${
+        pi ? ` — pass ${pi + 1}` : ""
+      }…`
+    );
+
+    const { outUrl, text, status } = await ezgifRecompress(
+      redir,
+      id,
+      resolution,
+      bitrate
+    );
+
+    if (!outUrl) {
+      lastError = `ezgif compress failed (HTTP ${status})`;
+      if (/error|too large|failed/i.test(text)) {
+        lastError += `: ${text.replace(/<[^>]+>/g, " ").slice(0, 80)}`;
+      }
+      await sleep(2500);
+      continue;
+    }
+
+    onProgress?.("Downloading compressed video…");
+    const cached = await cacheRemoteFile(outUrl, `ac_ezgif_${Date.now()}.mp4`);
+    const size = cached?.size || 0;
+
+    if (cached?.uri && size > 0 && size <= limit) {
+      onProgress?.(
+        `ezgif done — ${formatBytesSafe(size)} (under ${Math.round(
+          limit / MB
+        )}MB)`
+      );
+      return {
+        link: outUrl,
+        host: "ezgif",
+        localUri: cached.uri,
+        localSize: size,
+      };
+    }
+
+    if (cached?.uri) {
+      best = { url: outUrl, localUri: cached.uri, localSize: size || undefined };
+      onProgress?.(
+        size
+          ? `Still ${formatBytesSafe(size)} — compressing smaller…`
+          : "Got file; compressing smaller…"
+      );
+    } else {
+      best = { url: outUrl };
+      lastError = "ezgif OK but couldn't save file into Discord cache";
+    }
+  }
+
+  if (best?.localUri) {
     return {
-      link: outUrl,
+      link: best.url,
       host: "ezgif",
-      localUri: cached.uri,
-      localSize: cached.size || undefined,
+      localUri: best.localUri,
+      localSize: best.localSize,
+      error:
+        best.localSize && best.localSize > limit
+          ? `still ${formatBytesSafe(best.localSize)} after ezgif`
+          : undefined,
     };
   }
-
-  return { link: outUrl, host: "ezgif" };
+  if (best?.url) return { link: best.url, host: "ezgif", error: lastError };
+  return { link: null, host: "ezgif", error: lastError };
 }
 
 /** FreeConvert official API — needs Bearer access token. */
@@ -664,12 +841,15 @@ export async function uploadToCloudinary(
 export async function uploadExternal(
   snap: FileSnapshot,
   provider: Provider,
-  opts?: { catboxUserhash?: string; freeConvertApiKey?: string }
+  opts?: {
+    catboxUserhash?: string;
+    freeConvertApiKey?: string;
+    onProgress?: (msg: string) => void;
+  }
 ): Promise<UploadResult & { host: string }> {
   if (provider === "ezgif") {
-    const r = await compressWithEzgif(snap);
+    const r = await compressWithEzgif(snap, opts?.onProgress);
     if (r.link || r.localUri) return { ...r, host: "ezgif" };
-    // Optional Catbox if configured
     if ((opts?.catboxUserhash || getCatboxUserhash()).trim()) {
       const cb = await uploadToCatbox(snap, opts?.catboxUserhash);
       if (cb.link) return { ...cb, host: "catbox", error: r.error };

@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "ezgif/FreeConvert/Cloudinary remux to Discord native video when possible. v2.1",
+  "description": "ezgif wait-load-compress like the site, then Discord attach if under limit. v2.2",
   "authors": [
     {
       "name": "NickB926",

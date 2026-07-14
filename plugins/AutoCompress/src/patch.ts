@@ -184,7 +184,7 @@ async function tryExternal(
 
   const sizeLabel = formatBytes(size) || "video";
   if (provider === "ezgif") {
-    toast(`Compressing ${sizeLabel} via ezgif…`, true);
+    toast(`Starting ezgif compress for ${sizeLabel}…`, true);
   } else if (provider === "freeconvert") {
     toast(`Compressing ${sizeLabel} via FreeConvert…`, true);
   } else if (provider === "cloudinary") {
@@ -196,14 +196,20 @@ async function tryExternal(
   const result = await uploadExternal(snap, provider, {
     catboxUserhash: settings.catboxUserhash,
     freeConvertApiKey: settings.freeConvertApiKey,
+    onProgress: (msg) => toast(msg, true),
   });
 
-  // Best: re-inject compressed local file so Discord sends a real video attachment.
-  if (result.localUri) {
+  const limit = maxBytes();
+  const under =
+    !!result.localUri &&
+    (!result.localSize || result.localSize <= limit);
+
+  // Only Discord-reattach when we have a local file that fits the limit.
+  if (under && result.localUri) {
     try {
       applyLocalToMedia(media, result.localUri, result.localSize);
       toast(
-        `Re-uploading compressed ${formatBytes(result.localSize || 0) || "file"} to Discord…`,
+        `Sending ${formatBytes(result.localSize || 0) || "compressed video"} to Discord…`,
         true
       );
       const prepResult = await orig(...args);
@@ -213,6 +219,16 @@ async function tryExternal(
       console.warn("[AutoCompress] Discord re-attach failed:", e);
       toast("Discord re-attach failed — sending link instead", true);
     }
+  } else if (result.localUri && result.localSize && result.localSize > limit) {
+    toast(
+      `Still ${formatBytes(result.localSize)} after ${result.host} — Discord won't accept it, sending link`,
+      true
+    );
+  } else if (!result.localUri && result.link) {
+    toast(
+      `Couldn't cache compressed file for Discord attach — sending ${result.host} link`,
+      true
+    );
   }
 
   if (!result.link) {
@@ -230,7 +246,7 @@ async function tryExternal(
   const url = result.link.trim();
   await sendLink(channelId, url);
   purgePending(channelId, media);
-  toast(`Sent ${result.host || provider} link`, true);
+  toast(`Sent ${result.host || provider} link (not a Discord attachment)`, true);
   return "link";
 }
 
