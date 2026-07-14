@@ -1,0 +1,14 @@
+{
+  "name": "AutoCompress",
+  "description": "Best-effort auto-compress videos over 20MB before Discord upload (Kettu/Revenge).",
+  "authors": [
+    {
+      "name": "NickB926",
+      "id": "0"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "ic_file_upload_24px"
+  }
+}
