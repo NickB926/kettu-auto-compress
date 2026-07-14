@@ -8,17 +8,24 @@ export type PluginConfig = {
   compressImages: boolean;
   blockOnFail: boolean;
   showToasts: boolean;
-  /** Toast every upload the hook sees (helps debug "not working") */
   debugToasts: boolean;
+  /**
+   * When Discord can't shrink the file under maxMB, upload to Litterbox/Catbox
+   * and send the link instead. This is what actually works on mobile without FFmpeg.
+   */
+  fallbackExternal: boolean;
+  externalHost: "litterbox" | "catbox";
 };
 
 const defaults: PluginConfig = {
-  maxMB: 20,
+  maxMB: 24,
   compressVideos: true,
   compressImages: true,
   blockOnFail: true,
   showToasts: true,
-  debugToasts: true,
+  debugToasts: false,
+  fallbackExternal: true,
+  externalHost: "litterbox",
 };
 
 function coerceMaxMB(raw: unknown): number {
@@ -45,6 +52,10 @@ export function ensureSettings(): PluginConfig {
     storage.showToasts = defaults.showToasts;
   if (typeof storage.debugToasts !== "boolean")
     storage.debugToasts = defaults.debugToasts;
+  if (typeof storage.fallbackExternal !== "boolean")
+    storage.fallbackExternal = defaults.fallbackExternal;
+  if (storage.externalHost !== "litterbox" && storage.externalHost !== "catbox")
+    storage.externalHost = defaults.externalHost;
 
   return storage as PluginConfig;
 }

@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Best-effort auto-compress videos under your size limit before Discord upload (Kettu/Revenge). v1.2",
+  "description": "Compress videos under Discord’s limit; if that fails, send a Litterbox/Catbox link instead. v1.3",
   "authors": [
     {
       "name": "NickB926",

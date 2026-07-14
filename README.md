@@ -1,6 +1,8 @@
 # AutoCompress (Kettu / Revenge / Bunny)
 
-Best-effort plugin that keeps Discord mobile video (and optional image) uploads under a size limit (**default 20MB**).
+Best-effort plugin that keeps Discord mobile video (and optional image) uploads under a size limit (**default 24MB**).
+
+If Discord’s own compressor still can’t get the file under the limit (common without FFmpeg), **v1.3+** uploads to **Litterbox/Catbox** and sends a link instead — that’s what actually works day-to-day on Kettu.
 
 ## Install on your phone
 
