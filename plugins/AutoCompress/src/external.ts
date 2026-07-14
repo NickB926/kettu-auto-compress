@@ -1,11 +1,6 @@
-import { ReactNative } from "@vendetta/metro/common";
+﻿import { ReactNative } from "@vendetta/metro/common";
 
-import {
-  getCatboxUserhash,
-  getCloudinaryConfig,
-  maxBytes,
-  MB,
-} from "./config";
+import { maxBytes, MB } from "./config";
 import { applyCompressedUri, getUploadUri } from "./utils";
 
 export type FileSnapshot = {
@@ -24,8 +19,6 @@ export type UploadResult = {
   localUri?: string;
   localSize?: number;
 };
-
-export type Provider = "ezgif" | "freeconvert" | "cloudinary" | "catbox";
 
 export function captureSnapshot(media: any): FileSnapshot | null {
   let uri = getUploadUri(media);
@@ -275,15 +268,8 @@ function targetBitrateKbps(targetBytes: number, durationSecs?: number): number {
   return Math.min(4000, Math.max(250, Math.floor(videoBps / 1000)));
 }
 
-function pickResolution(targetBytes: number): string {
-  // Keep resolution modest so Discord limit is reachable.
-  if (targetBytes <= 12 * MB) return "640x360";
-  if (targetBytes <= 20 * MB) return "854x480";
-  return "1280x720";
-}
-
 function parseEzgifOutput(html: string): string | null {
-  // Real ezgif output uses CDN hosts like //s1.ezgif.com/tmp/… (not ezgif.com/tmp).
+  // Real ezgif output uses CDN hosts like //s1.ezgif.com/tmp/â€¦ (not ezgif.com/tmp).
   const patterns = [
     /src=["']((?:https?:)?\/\/s\d+\.ezgif\.com\/tmp\/[^"']+)["']/i,
     /href=["']((?:https?:)?\/\/s\d+\.ezgif\.com\/tmp\/[^"']+)["']/i,
@@ -405,19 +391,12 @@ async function getText(
     url: (res as any).url || url,
   };
 }
-
 /** Same as opening the tool page and waiting for the video preview to finish loading. */
 async function waitForEzgifReady(
-  editUrl: string,
-  onProgress?: (msg: string) => void
+  editUrl: string
 ): Promise<{ ok: boolean; durationSecs?: number; html: string }> {
   let lastHtml = "";
   for (let i = 0; i < 30; i++) {
-    onProgress?.(
-      i === 0
-        ? "Waiting for ezgif to load the video…"
-        : `Still waiting for ezgif load… (${i + 1})`
-    );
     const page = await getText(editUrl);
     lastHtml = page.text || "";
     const ready =
@@ -456,7 +435,6 @@ async function ezgifRecompress(
   form.append("resolution", resolution);
   form.append("bitrate", String(bitrate));
   form.append("format", "mp4");
-  // Match the site's "Recompress video!" button field.
   form.append("video-compressor", "Recompress video!");
   form.append("ajax", "true");
 
@@ -468,24 +446,17 @@ async function ezgifRecompress(
   };
 }
 
-/**
- * Unofficial ezgif scrape — mirrors: upload → wait for load → pick settings →
- * click Recompress → download. Multi-pass until Discord size limit.
- */
+/** Upload â†’ wait load â†’ one-shot compress (one retry) â†’ download if under limit. */
 export async function compressWithEzgif(
-  snap: FileSnapshot,
-  onProgress?: (msg: string) => void
+  snap: FileSnapshot
 ): Promise<UploadResult> {
   const filename = withExtension(snap.filename || "upload", snap.mimeType);
   const mime = normalizeMime(snap.mimeType, filename);
   const limit = maxBytes();
 
-  onProgress?.("Uploading to ezgif…");
-
   let first: Awaited<ReturnType<typeof postForm>> | null = null;
   let staged: string | null = null;
   try {
-    onProgress?.("Staging file (Litterbox → ezgif URL)…");
     staged = await stageToLitterbox(snap);
   } catch (e) {
     console.warn("[AutoCompress] litterbox stage failed:", e);
@@ -499,7 +470,6 @@ export async function compressWithEzgif(
   }
 
   if (!first || !parseEzgifEditUrl(first.url, first.location, first.text)) {
-    onProgress?.("Uploading file directly to ezgif…");
     const up = new FormData();
     up.append("new-image", filePart(snap, filename, mime));
     up.append("upload", "Upload video!");
@@ -517,7 +487,7 @@ export async function compressWithEzgif(
 
   const id = redir.split("/").pop()!.replace(/\.html$/i, "");
 
-  const ready = await waitForEzgifReady(redir, onProgress);
+  const ready = await waitForEzgifReady(redir);
   if (!ready.ok) {
     return {
       link: null,
@@ -530,12 +500,8 @@ export async function compressWithEzgif(
     1,
     ready.durationSecs || snap.durationSecs || 40
   );
-  const targetMB = Math.round(limit / MB);
-  // Aim a bit under the limit so Discord accepts it.
   const aimBytes = Math.floor(limit * 0.9);
 
-  // One resolution from clip length, one bitrate from aimBytes / duration.
-  // Then at most one smaller retry — not an endless grid.
   const resolution =
     durationSecs > 90
       ? "426x240"
@@ -546,12 +512,10 @@ export async function compressWithEzgif(
           : "1280x720";
 
   let bitrate = targetBitrateKbps(aimBytes, durationSecs);
-  // Floor/ceil within what ezgif accepts usefully.
   bitrate = Math.min(2000, Math.max(200, bitrate));
 
   const attempts: Array<{ resolution: string; bitrate: number }> = [
     { resolution, bitrate },
-    // One backup: half bitrate + one step lower res if first pass is still big.
     {
       resolution:
         resolution === "1280x720"
@@ -570,12 +534,6 @@ export async function compressWithEzgif(
 
   for (let i = 0; i < attempts.length; i++) {
     const pass = attempts[i];
-    onProgress?.(
-      i === 0
-        ? `ezgif one-shot: ${pass.resolution} @ ${pass.bitrate}kbps (aim ≤${targetMB}MB)…`
-        : `Still over ${targetMB}MB — one smaller pass (${pass.resolution} @ ${pass.bitrate}kbps)…`
-    );
-
     const { outUrl, text, status } = await ezgifRecompress(
       redir,
       id,
@@ -592,28 +550,15 @@ export async function compressWithEzgif(
 
     const reported = parseEzgifFileSizeBytes(text);
     if (reported && reported > limit) {
-      onProgress?.(
-        `Result ${formatBytesSafe(reported)} — over ${targetMB}MB` +
-          (i === 0 ? ", retrying once…" : "")
-      );
-      // Don't download oversized results; only retry on first failure.
       if (i === 0) continue;
       lastError = `still ${formatBytesSafe(reported)} after 2 passes`;
       break;
     }
 
-    // Only download when ezgif says it's under (or size unknown on last try).
-    onProgress?.("Downloading final video (once)…");
-    const cached = await cacheRemoteFile(
-      outUrl,
-      `ac_ezgif_${Date.now()}.mp4`
-    );
+    const cached = await cacheRemoteFile(outUrl, `ac_ezgif_${Date.now()}.mp4`);
     const size = cached?.size || reported || 0;
 
     if (cached?.uri && (!size || size <= limit)) {
-      onProgress?.(
-        `Ready — ${formatBytesSafe(size || reported || 0)} ≤${targetMB}MB`
-      );
       return {
         link: outUrl,
         host: "ezgif",
@@ -622,12 +567,7 @@ export async function compressWithEzgif(
       };
     }
 
-    if (cached?.uri && size > limit && i === 0) {
-      onProgress?.(
-        `Downloaded ${formatBytesSafe(size)} — still over, one smaller pass…`
-      );
-      continue;
-    }
+    if (cached?.uri && size > limit && i === 0) continue;
 
     if (cached?.uri) {
       return {
@@ -652,7 +592,6 @@ export async function compressWithEzgif(
 }
 
 function parseEzgifFileSizeBytes(html: string): number | null {
-  // e.g. File size: <strong>401.96KiB</strong> or 12.3 MiB / MB
   const m = html.match(
     /File size:\s*<strong>\s*([\d.]+)\s*(KiB|KB|MiB|MB|GiB|GB|B)\s*<\/strong>/i
   );
@@ -667,268 +606,11 @@ function parseEzgifFileSizeBytes(html: string): number | null {
   return null;
 }
 
-/** FreeConvert official API — needs Bearer access token. */
-export async function compressWithFreeConvert(
-  snap: FileSnapshot,
-  apiKey: string
-): Promise<UploadResult> {
-  const key = apiKey.trim();
-  if (!key) {
-    return {
-      link: null,
-      host: "freeconvert",
-      error: "Set FreeConvert API key in settings",
-    };
-  }
-
-  const auth = { Authorization: `Bearer ${key}`, Accept: "application/json" };
-  const filename = withExtension(snap.filename || "upload", snap.mimeType);
-  const mime = normalizeMime(snap.mimeType, filename);
-  const limit = maxBytes();
-  const bitrate = targetBitrateKbps(limit, snap.durationSecs);
-  const [rw, rh] = pickResolution(limit).split("x");
-
-  // 1) Create standalone upload task → pre-signed form
-  const uploadTaskRes = await fetch(
-    "https://api.freeconvert.com/v1/process/import/upload",
-    { method: "POST", headers: auth }
-  );
-  const uploadTask = await uploadTaskRes.json().catch(() => null);
-  const formMeta = uploadTask?.result?.form;
-  if (!uploadTaskRes.ok || !uploadTask?.id || !formMeta?.url) {
-    return {
-      link: null,
-      host: "freeconvert",
-      error: `FreeConvert upload init: ${uploadTask?.message || uploadTaskRes.status}`,
-    };
-  }
-
-  const form = new FormData();
-  for (const [k, v] of Object.entries(formMeta.parameters || {})) {
-    form.append(k, String(v));
-  }
-  form.append("file", filePart(snap, filename, mime));
-
-  const up = await postForm(formMeta.url, form);
-  if (up.status < 200 || up.status >= 300) {
-    return {
-      link: null,
-      host: "freeconvert",
-      error: `FreeConvert upload HTTP ${up.status}`,
-    };
-  }
-
-  // 2) Job: compress + export using uploaded task id
-  const jobRes = await fetch("https://api.freeconvert.com/v1/process/jobs", {
-    method: "POST",
-    headers: { ...auth, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      tasks: {
-        "compress-1": {
-          operation: "compress",
-          input: uploadTask.id,
-          input_format: "mp4",
-          output_format: "mp4",
-          options: {
-            video_codec: "h264",
-            video_bitrate: bitrate,
-            width: Number(rw) || 854,
-            height: Number(rh) || 480,
-          },
-        },
-        "export-1": {
-          operation: "export/url",
-          input: ["compress-1"],
-          filename: `ac_${Date.now()}.mp4`,
-        },
-      },
-    }),
-  });
-  const job = await jobRes.json().catch(() => null);
-  if (!jobRes.ok || !job?.id) {
-    return {
-      link: null,
-      host: "freeconvert",
-      error: `FreeConvert job: ${job?.message || jobRes.status}`,
-    };
-  }
-
-  // 3) Poll
-  let exportUrl: string | null = null;
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const poll = await fetch(
-      `https://api.freeconvert.com/v1/process/jobs/${job.id}`,
-      { headers: auth }
-    );
-    const body = await poll.json().catch(() => null);
-    const status = String(body?.status ?? "").toLowerCase();
-    if (
-      status === "completed" ||
-      status === "job.completed" ||
-      status.includes("completed")
-    ) {
-      const tasks = Array.isArray(body?.tasks)
-        ? body.tasks
-        : Object.values(body?.tasks || {});
-      for (const t of tasks as any[]) {
-        const url =
-          t?.result?.url ||
-          t?.result?.files?.[0]?.url ||
-          t?.result?.exportUrl;
-        if (url) {
-          exportUrl = cleanHostedUrl(url);
-          break;
-        }
-      }
-      break;
-    }
-    if (
-      status === "failed" ||
-      status === "job.failed" ||
-      status.includes("fail")
-    ) {
-      return {
-        link: null,
-        host: "freeconvert",
-        error: "FreeConvert job failed",
-      };
-    }
-  }
-
-  if (!exportUrl) {
-    return {
-      link: null,
-      host: "freeconvert",
-      error: "FreeConvert timed out waiting for output",
-    };
-  }
-
-  const cached = await cacheRemoteFile(exportUrl, `ac_fc_${Date.now()}.mp4`);
-  if (cached?.uri) {
-    return {
-      link: exportUrl,
-      host: "freeconvert",
-      localUri: cached.uri,
-      localSize: cached.size || undefined,
-    };
-  }
-  return { link: exportUrl, host: "freeconvert" };
-}
-
-export async function uploadToCatbox(
-  snap: FileSnapshot,
-  userhash?: string
-): Promise<UploadResult> {
-  const hash = (userhash ?? getCatboxUserhash()).trim();
-  if (!hash) {
-    return { link: null, host: "catbox", error: "No Catbox userhash" };
-  }
-  const filename = withExtension(snap.filename || "upload", snap.mimeType);
-  const mime = normalizeMime(snap.mimeType, filename);
-  const formData = new FormData();
-  formData.append("reqtype", "fileupload");
-  formData.append("userhash", hash);
-  formData.append("fileToUpload", filePart(snap, filename, mime));
-  const { text, status } = await postForm(
-    "https://catbox.moe/user/api.php",
-    formData
-  );
-  const link = cleanHostedUrl(text);
-  if (link) return { link, host: "catbox" };
-  return {
-    link: null,
-    host: "catbox",
-    error: `Catbox HTTP ${status}: ${(text || "").slice(0, 100)}`,
-  };
-}
-
-export async function uploadToCloudinary(
-  snap: FileSnapshot
-): Promise<UploadResult> {
-  const cfg = getCloudinaryConfig();
-  if (!cfg) {
-    return {
-      link: null,
-      host: "cloudinary",
-      error: "Cloudinary not configured",
-    };
-  }
-  const filename = withExtension(snap.filename || "upload", snap.mimeType);
-  const mime = normalizeMime(snap.mimeType, filename);
-  const endpoint = `https://api.cloudinary.com/v1_1/${encodeURIComponent(
-    cfg.cloudName
-  )}/video/upload`;
-  const formData = new FormData();
-  formData.append("upload_preset", cfg.uploadPreset);
-  formData.append("file", filePart(snap, filename, mime));
-  const { text, status, json } = await postForm(endpoint, formData);
-  const secure =
-    cleanHostedUrl(json?.secure_url) ||
-    cleanHostedUrl(json?.url) ||
-    cleanHostedUrl(text);
-  if (!secure) {
-    return {
-      link: null,
-      host: "cloudinary",
-      error: `Cloudinary: ${json?.error?.message || status}`,
-    };
-  }
-  const bytes = Number(json?.bytes ?? 0);
-  const limit = maxBytes();
-  if (!bytes || bytes <= limit) {
-    const cached = await cacheRemoteFile(
-      secure,
-      `ac_cl_${Date.now()}_${filename}`
-    );
-    if (cached?.uri) {
-      return {
-        link: secure,
-        host: "cloudinary",
-        localUri: cached.uri,
-        localSize: cached.size || bytes || undefined,
-      };
-    }
-  }
-  return { link: secure, host: "cloudinary" };
-}
-
 export async function uploadExternal(
-  snap: FileSnapshot,
-  provider: Provider,
-  opts?: {
-    catboxUserhash?: string;
-    freeConvertApiKey?: string;
-    onProgress?: (msg: string) => void;
-  }
+  snap: FileSnapshot
 ): Promise<UploadResult & { host: string }> {
-  if (provider === "ezgif") {
-    const r = await compressWithEzgif(snap, opts?.onProgress);
-    if (r.link || r.localUri) return { ...r, host: "ezgif" };
-    if ((opts?.catboxUserhash || getCatboxUserhash()).trim()) {
-      const cb = await uploadToCatbox(snap, opts?.catboxUserhash);
-      if (cb.link) return { ...cb, host: "catbox", error: r.error };
-    }
-    return { ...r, host: "ezgif" };
-  }
-  if (provider === "freeconvert") {
-    const r = await compressWithFreeConvert(
-      snap,
-      opts?.freeConvertApiKey || ""
-    );
-    return { ...r, host: "freeconvert" };
-  }
-  if (provider === "cloudinary") {
-    const r = await uploadToCloudinary(snap);
-    if (r.link || r.localUri) return { ...r, host: "cloudinary" };
-    if ((opts?.catboxUserhash || getCatboxUserhash()).trim()) {
-      const cb = await uploadToCatbox(snap, opts?.catboxUserhash);
-      if (cb.link) return { ...cb, host: "catbox", error: r.error };
-    }
-    return { ...r, host: "cloudinary" };
-  }
-  const cb = await uploadToCatbox(snap, opts?.catboxUserhash);
-  return { ...cb, host: cb.host || "catbox" };
+  const r = await compressWithEzgif(snap);
+  return { ...r, host: r.host || "ezgif" };
 }
 
 export function applyLocalToMedia(

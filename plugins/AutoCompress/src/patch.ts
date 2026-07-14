@@ -20,13 +20,13 @@ import {
 
 const SNAP_KEY = "__acSnapshot";
 
-function toast(msg: string, force = false) {
-  const s = ensureSettings();
-  if (force || s.showToasts || s.debugToasts) showToast(msg);
+function toast(msg: string) {
+  try {
+    showToast(msg);
+  } catch {}
 }
 
 function externalEnabled(): boolean {
-  // Treat anything except explicit false as on (matches default).
   return ensureSettings().fallbackExternal !== false;
 }
 
@@ -123,10 +123,10 @@ async function sendLink(channelId: string | undefined, content: string) {
   }
   try {
     (ReactNative as any)?.Clipboard?.setString?.(content);
-    toast("Link copied (couldn't auto-send — paste it)", true);
+    toast("Link copied (couldn't auto-send — paste it)");
     return false;
   } catch {
-    toast(content, true);
+    toast(content);
     return false;
   }
 }
@@ -136,8 +136,8 @@ function delay(ms: number) {
 }
 
 /**
- * Compress/host externally. Prefer remux providers → local file → Discord
- * attachment (native video player). Otherwise send a bare media URL.
+ * ezgif remux → local file under limit → Discord attachment.
+ * Otherwise send the ezgif media URL.
  */
 async function tryExternal(
   media: any,
@@ -146,110 +146,42 @@ async function tryExternal(
   orig: (...a: any[]) => any,
   args: any[]
 ): Promise<{ prepResult: any } | "link" | false> {
-  if (!externalEnabled()) {
-    toast("External fallback is OFF in AutoCompress settings", true);
-    return false;
-  }
+  if (!externalEnabled()) return false;
   if (!snap?.uri) {
-    toast("External failed: no local file URI", true);
+    toast("AutoCompress: no local file URI");
     return false;
   }
 
-  const settings = ensureSettings();
-  const provider = settings.provider || "ezgif";
   const channelId = getChannelId(media, snap);
-
-  if (provider === "cloudinary") {
-    if (
-      !String(settings.cloudinaryCloudName ?? "").trim() ||
-      !String(settings.cloudinaryUploadPreset ?? "").trim()
-    ) {
-      toast(
-        "Cloudinary not configured — set cloud name + unsigned preset, or switch to ezgif",
-        true
-      );
-      return false;
-    }
-  } else if (provider === "freeconvert") {
-    if (!String(settings.freeConvertApiKey ?? "").trim()) {
-      toast("Set FreeConvert API key in AutoCompress settings", true);
-      return false;
-    }
-  } else if (provider === "catbox") {
-    if (!String(settings.catboxUserhash ?? "").trim()) {
-      toast("Set Catbox userhash in AutoCompress settings", true);
-      return false;
-    }
-  }
-
-  const sizeLabel = formatBytes(size) || "video";
-  if (provider === "ezgif") {
-    toast(
-      `ezgif started for ${sizeLabel} — can take 1–3 min, wait for toasts…`,
-      true
-    );
-  } else if (provider === "freeconvert") {
-    toast(`Compressing ${sizeLabel} via FreeConvert…`, true);
-  } else if (provider === "cloudinary") {
-    toast(`Compressing ${sizeLabel} via Cloudinary…`, true);
-  } else {
-    toast(`Uploading ${sizeLabel} to Catbox…`, true);
-  }
-
-  const result = await uploadExternal(snap, provider, {
-    catboxUserhash: settings.catboxUserhash,
-    freeConvertApiKey: settings.freeConvertApiKey,
-    onProgress: (msg) => toast(msg, true),
-  });
+  const result = await uploadExternal(snap);
 
   const limit = maxBytes();
   const under =
-    !!result.localUri &&
-    (!result.localSize || result.localSize <= limit);
+    !!result.localUri && (!result.localSize || result.localSize <= limit);
 
-  // Only Discord-reattach when we have a local file that fits the limit.
   if (under && result.localUri) {
     try {
       applyLocalToMedia(media, result.localUri, result.localSize);
-      toast(
-        `Sending ${formatBytes(result.localSize || 0) || "compressed video"} to Discord…`,
-        true
-      );
       const prepResult = await orig(...args);
-      toast("Sent as Discord video", true);
       return { prepResult };
     } catch (e) {
       console.warn("[AutoCompress] Discord re-attach failed:", e);
-      toast("Discord re-attach failed — sending link instead", true);
     }
-  } else if (result.localUri && result.localSize && result.localSize > limit) {
-    toast(
-      `Still ${formatBytes(result.localSize)} after ${result.host} — Discord won't accept it, sending link`,
-      true
-    );
-  } else if (!result.localUri && result.link) {
-    toast(
-      `Couldn't cache compressed file for Discord attach — sending ${result.host} link`,
-      true
-    );
   }
 
   if (!result.link) {
-    toast(`External failed: ${result.error ?? "unknown"}`, true);
+    toast(`ezgif failed: ${result.error ?? "unknown"}`);
     return false;
   }
 
-  // Link path: kill Discord's pending send, then post a bare URL.
   cancelUpload(media);
   purgePending(channelId, media);
   setTimeout(() => purgePending(channelId, media), 250);
   setTimeout(() => purgePending(channelId, media), 1000);
 
   await delay(700);
-  const url = result.link.trim();
-  await sendLink(channelId, url);
+  await sendLink(channelId, result.link.trim());
   purgePending(channelId, media);
-  toast(`Sent ${result.host || provider} link (not a Discord attachment)`, true);
   return "link";
 }
 
@@ -277,19 +209,11 @@ async function handleCompress(
   let size = await resolveUploadSize(media);
   if (snap && (!snap.size || snap.size <= 0) && size > 0) snap.size = size;
 
-  if (settings.debugToasts) {
-    const kind = video ? "video" : image ? "image" : "file";
-    toast(
-      `AC ${kind}: ${snap?.filename ?? "?"} · ${size ? formatBytes(size) : "size?"} · uri=${snap?.uri ? "yes" : "NO"}`,
-      true
-    );
-  }
-
   if (!cares) return orig(...args);
 
   if (size > 0 && size <= hardLimit) return orig(...args);
 
-  // Oversized: go external FIRST while the URI is still valid.
+  // Oversized: ezgif first while the URI is still valid.
   if (externalEnabled()) {
     const outcome = await tryExternal(
       media,
@@ -304,17 +228,11 @@ async function handleCompress(
     }
   }
 
-  const kind = video ? "video" : "image";
-  toast(
-    `Compressing ${kind}${size ? ` (${formatBytes(size)})` : ""} → ≤${settings.maxMB}MB…`
-  );
-
   try {
     const result = await compressUpload(media, orig, args, hardLimit);
     size = result.finalSize || getUploadSize(media) || size;
 
     if (result.proceeded && size > 0 && size <= hardLimit) {
-      toast(`OK ${formatBytes(size)} via ${result.method}`);
       return result.prepResult;
     }
 
@@ -332,14 +250,12 @@ async function handleCompress(
 
     if (settings.blockOnFail) {
       toast(
-        `Still ${formatBytes(size) || "too big"} — blocked (external upload also failed)`,
-        true
+        `Still ${formatBytes(size) || "too big"} — blocked (ezgif also failed)`
       );
       cancelUpload(media);
       return null;
     }
 
-    toast(`Still ${formatBytes(size)} — uploading anyway (may fail)`);
     return result.prepResult;
   } catch (err) {
     console.error("[AutoCompress] compress failed:", err);
@@ -356,11 +272,10 @@ async function handleCompress(
     }
 
     if (settings.blockOnFail) {
-      toast("Compression failed — blocked", true);
+      toast("Compression failed — blocked");
       cancelUpload(media);
       return null;
     }
-    toast("Compression failed — original file");
     return orig(...args);
   }
 }
@@ -437,7 +352,7 @@ export function patchUploader(): () => void {
 
             // Recover: Discord API rejected after our pipe — try external now.
             if (externalEnabled()) {
-              toast("Discord rejected file — recovering via external…", true);
+              toast("Discord rejected file — recovering via ezgif…");
               tryExternal(
                 self,
                 getUploadSize(self) || snap?.size || 0,
@@ -448,10 +363,7 @@ export function patchUploader(): () => void {
                 console.warn("[AutoCompress] 40005 recovery failed:", e)
               );
             } else {
-              toast(
-                "Discord rejected (over limit). Turn ON External fallback in AutoCompress.",
-                true
-              );
+              toast("Discord rejected (over limit). Enable ezgif compress in settings.");
             }
             setTimeout(() => purgePending(getChannelId(self, snap), self), 300);
           })
@@ -494,13 +406,7 @@ export function patchUploader(): () => void {
   }
 
   if (!hooked) {
-    toast("AutoCompress: no upload hooks found (Discord update?)", true);
-  } else {
-    const s = ensureSettings();
-    toast(
-      `AutoCompress ready (≤${s.maxMB}MB${externalEnabled() ? " + external" : ""})`,
-      true
-    );
+    toast("AutoCompress: no upload hooks found (Discord update?)");
   }
 
   return () => {

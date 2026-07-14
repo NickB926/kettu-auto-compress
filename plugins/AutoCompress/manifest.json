@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "ezgif one-shot under 20MB (one retry max), then Discord attach. v2.4",
+  "description": "Oversized videos → ezgif under 20MB → Discord. v2.5",
   "authors": [
     {
       "name": "NickB926",
