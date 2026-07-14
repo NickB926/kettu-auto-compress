@@ -184,7 +184,10 @@ async function tryExternal(
 
   const sizeLabel = formatBytes(size) || "video";
   if (provider === "ezgif") {
-    toast(`Starting ezgif compress for ${sizeLabel}…`, true);
+    toast(
+      `ezgif started for ${sizeLabel} — can take 1–3 min, wait for toasts…`,
+      true
+    );
   } else if (provider === "freeconvert") {
     toast(`Compressing ${sizeLabel} via FreeConvert…`, true);
   } else if (provider === "cloudinary") {
