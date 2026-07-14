@@ -9,10 +9,12 @@ export type PluginConfig = {
   blockOnFail: boolean;
   showToasts: boolean;
   debugToasts: boolean;
-  /** Upload oversized media to Catbox and send the link. */
   fallbackExternal: boolean;
-  /** Catbox account userhash — required (anonymous API is blocked). */
+  /** catbox = link only; cloudinary = compress then prefer Discord attachment */
+  provider: "catbox" | "cloudinary";
   catboxUserhash: string;
+  cloudinaryCloudName: string;
+  cloudinaryUploadPreset: string;
 };
 
 const defaults: PluginConfig = {
@@ -23,7 +25,10 @@ const defaults: PluginConfig = {
   showToasts: true,
   debugToasts: false,
   fallbackExternal: true,
+  provider: "catbox",
   catboxUserhash: "",
+  cloudinaryCloudName: "",
+  cloudinaryUploadPreset: "",
 };
 
 function coerceMaxMB(raw: unknown): number {
@@ -35,7 +40,6 @@ function coerceMaxMB(raw: unknown): number {
   return defaults.maxMB;
 }
 
-/** Only writes storage when a value is actually missing/wrong — safe under useProxy. */
 export function ensureSettings(): PluginConfig {
   const coerced = coerceMaxMB(storage.maxMB);
   if (storage.maxMB !== coerced) storage.maxMB = coerced;
@@ -52,16 +56,26 @@ export function ensureSettings(): PluginConfig {
     storage.debugToasts = defaults.debugToasts;
   if (typeof storage.fallbackExternal !== "boolean")
     storage.fallbackExternal = defaults.fallbackExternal;
+
+  if (storage.provider !== "catbox" && storage.provider !== "cloudinary") {
+    // Prefer Cloudinary when credentials already exist.
+    const hasCl =
+      String(storage.cloudinaryCloudName ?? "").trim() &&
+      String(storage.cloudinaryUploadPreset ?? "").trim();
+    storage.provider = hasCl ? "cloudinary" : "catbox";
+  }
+
   if (typeof storage.catboxUserhash !== "string")
     storage.catboxUserhash = defaults.catboxUserhash;
+  if (typeof storage.cloudinaryCloudName !== "string")
+    storage.cloudinaryCloudName = defaults.cloudinaryCloudName;
+  if (typeof storage.cloudinaryUploadPreset !== "string")
+    storage.cloudinaryUploadPreset = defaults.cloudinaryUploadPreset;
 
-  // Drop legacy litterbox preference if still stored.
-  if (storage.externalHost != null) {
-    try {
-      delete storage.externalHost;
-    } catch {
-      storage.externalHost = undefined;
-    }
+  try {
+    delete storage.externalHost;
+  } catch {
+    storage.externalHost = undefined;
   }
 
   return storage as PluginConfig;
@@ -73,4 +87,14 @@ export function maxBytes(): number {
 
 export function getCatboxUserhash(): string {
   return String(storage.catboxUserhash ?? "").trim();
+}
+
+export function getCloudinaryConfig(): {
+  cloudName: string;
+  uploadPreset: string;
+} | null {
+  const cloudName = String(storage.cloudinaryCloudName ?? "").trim();
+  const uploadPreset = String(storage.cloudinaryUploadPreset ?? "").trim();
+  if (!cloudName || !uploadPreset) return null;
+  return { cloudName, uploadPreset };
 }

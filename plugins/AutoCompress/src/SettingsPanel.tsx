@@ -19,6 +19,47 @@ function parseMB(raw: string): number | null {
   return n;
 }
 
+function Field({
+  TextInput,
+  label,
+  value,
+  onCommit,
+  placeholder,
+}: {
+  TextInput: any;
+  label: string;
+  value: string;
+  onCommit: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = React.useState(value);
+  const focused = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!focused.current) setDraft(value);
+  }, [value]);
+
+  return (
+    <>
+      <TextInput
+        value={draft}
+        placeholder={placeholder}
+        autoCapitalize="none"
+        autoCorrect={false}
+        onChange={(v: string) => setDraft(String(v ?? ""))}
+        onFocus={() => {
+          focused.current = true;
+        }}
+        onBlur={() => {
+          focused.current = false;
+          onCommit(String(draft ?? "").trim());
+        }}
+        isClearable
+      />
+    </>
+  );
+}
+
 export default function SettingsPanel() {
   React.useEffect(() => {
     ensureSettings();
@@ -26,24 +67,13 @@ export default function SettingsPanel() {
 
   useProxy(storage);
 
-  const [draft, setDraft] = React.useState(() =>
-    String(storage.maxMB ?? 24)
-  );
-  const [hashDraft, setHashDraft] = React.useState(() =>
-    String(storage.catboxUserhash ?? "")
-  );
+  const [draft, setDraft] = React.useState(() => String(storage.maxMB ?? 24));
   const focused = React.useRef(false);
-  const hashFocused = React.useRef(false);
 
   React.useEffect(() => {
     if (focused.current) return;
     setDraft(String(storage.maxMB ?? 24));
   }, [storage.maxMB]);
-
-  React.useEffect(() => {
-    if (hashFocused.current) return;
-    setHashDraft(String(storage.catboxUserhash ?? ""));
-  }, [storage.catboxUserhash]);
 
   const commitDraft = () => {
     const n = parseMB(draft);
@@ -55,11 +85,7 @@ export default function SettingsPanel() {
     setDraft(String(n));
   };
 
-  const commitHash = () => {
-    const next = String(hashDraft ?? "").trim();
-    storage.catboxUserhash = next;
-    setHashDraft(next);
-  };
+  const useCloudinary = storage.provider === "cloudinary";
 
   if (Table?.TableRowGroup && TextInputMod?.TextInput) {
     const { TableRowGroup, TableSwitchRow, TableRow } = Table;
@@ -68,10 +94,6 @@ export default function SettingsPanel() {
     return (
       <ScrollView style={{ flex: 1 }}>
         <TableRowGroup title="Target size">
-          <TableRow
-            label="Max size (MB)"
-            subLabel="Stay ≤24–25 for free Discord. Tap away to save."
-          />
           <TextInput
             value={draft}
             placeholder="24"
@@ -88,7 +110,72 @@ export default function SettingsPanel() {
           />
         </TableRowGroup>
 
-        <TableRowGroup title="What to compress">
+        <TableRowGroup title="Provider (for oversized videos)">
+          <TableSwitchRow
+            label="Use Cloudinary (recommended)"
+            subLabel="Compresses remotely, then tries Discord's native video player"
+            value={useCloudinary}
+            onValueChange={(v: boolean) => {
+              storage.provider = v ? "cloudinary" : "catbox";
+            }}
+          />
+          <TableSwitchRow
+            label="External fallback enabled"
+            value={!!storage.fallbackExternal}
+            onValueChange={(v: boolean) => {
+              if (storage.fallbackExternal !== v) storage.fallbackExternal = v;
+            }}
+          />
+        </TableRowGroup>
+
+        <TableRowGroup title="Cloudinary setup (free)">
+          <TableRow
+            label="1) cloudinary.com → free account"
+            subLabel="2) Settings → Upload → Add upload preset → Signing mode: Unsigned"
+          />
+          <TableRow
+            label="3) In that preset, add Incoming transformation"
+            subLabel="e.g. w_720,q_auto:low,f_mp4  (keeps videos under Discord's limit)"
+          />
+          <TableRow label="Cloud name" />
+          <Field
+            TextInput={TextInput}
+            label="cloud"
+            value={String(storage.cloudinaryCloudName ?? "")}
+            placeholder="your cloud name"
+            onCommit={(v) => {
+              storage.cloudinaryCloudName = v;
+            }}
+          />
+          <TableRow label="Unsigned upload preset name" />
+          <Field
+            TextInput={TextInput}
+            label="preset"
+            value={String(storage.cloudinaryUploadPreset ?? "")}
+            placeholder="discord_compress"
+            onCommit={(v) => {
+              storage.cloudinaryUploadPreset = v;
+            }}
+          />
+        </TableRowGroup>
+
+        <TableRowGroup title="Catbox fallback (link only)">
+          <TableRow
+            label="Userhash"
+            subLabel="Used if Cloudinary fails, or if provider = Catbox"
+          />
+          <Field
+            TextInput={TextInput}
+            label="hash"
+            value={String(storage.catboxUserhash ?? "")}
+            placeholder="catbox userhash"
+            onCommit={(v) => {
+              storage.catboxUserhash = v;
+            }}
+          />
+        </TableRowGroup>
+
+        <TableRowGroup title="Other">
           <TableSwitchRow
             label="Videos"
             value={!!storage.compressVideos}
@@ -101,60 +188,6 @@ export default function SettingsPanel() {
             value={!!storage.compressImages}
             onValueChange={(v: boolean) => {
               if (storage.compressImages !== v) storage.compressImages = v;
-            }}
-          />
-        </TableRowGroup>
-
-        <TableRowGroup title="Catbox fallback">
-          <TableSwitchRow
-            label="Upload to Catbox when over limit"
-            subLabel="Sends a files.catbox.moe link instead of a Discord attachment"
-            value={!!storage.fallbackExternal}
-            onValueChange={(v: boolean) => {
-              if (storage.fallbackExternal !== v) storage.fallbackExternal = v;
-            }}
-          />
-          <TableRow
-            label="Catbox userhash (required)"
-            subLabel="Log into catbox.moe → copy userhash → paste here → tap away to save"
-          />
-          <TextInput
-            value={hashDraft}
-            placeholder="your userhash"
-            autoCapitalize="none"
-            autoCorrect={false}
-            onChange={(v: string) => setHashDraft(String(v ?? ""))}
-            onFocus={() => {
-              hashFocused.current = true;
-            }}
-            onBlur={() => {
-              hashFocused.current = false;
-              commitHash();
-            }}
-            isClearable
-          />
-          <TableRow
-            label={
-              String(storage.catboxUserhash ?? "").trim()
-                ? `Saved hash ending …${String(storage.catboxUserhash).trim().slice(-4)}`
-                : "No userhash saved yet"
-            }
-          />
-          <TableSwitchRow
-            label="Block send if Catbox fails"
-            value={!!storage.blockOnFail}
-            onValueChange={(v: boolean) => {
-              if (storage.blockOnFail !== v) storage.blockOnFail = v;
-            }}
-          />
-        </TableRowGroup>
-
-        <TableRowGroup title="Debug">
-          <TableSwitchRow
-            label="Show toasts"
-            value={!!storage.showToasts}
-            onValueChange={(v: boolean) => {
-              if (storage.showToasts !== v) storage.showToasts = v;
             }}
           />
           <TableSwitchRow
@@ -171,20 +204,28 @@ export default function SettingsPanel() {
 
   return (
     <ScrollView style={{ flex: 1 }}>
-      <FormSection title="Catbox">
+      <FormSection title="Cloudinary">
         <FormInput
-          title="Catbox userhash"
-          value={hashDraft}
-          onChange={(v: string) => setHashDraft(String(v ?? ""))}
-          onBlur={commitHash}
+          title="Cloud name"
+          value={String(storage.cloudinaryCloudName ?? "")}
+          onChange={(v: string) => {
+            storage.cloudinaryCloudName = String(v ?? "");
+          }}
+        />
+        <FormInput
+          title="Upload preset"
+          value={String(storage.cloudinaryUploadPreset ?? "")}
+          onChange={(v: string) => {
+            storage.cloudinaryUploadPreset = String(v ?? "");
+          }}
         />
         <FormRow
-          label="External fallback"
+          label="Use Cloudinary"
           trailing={
             <FormSwitch
-              value={!!storage.fallbackExternal}
+              value={storage.provider === "cloudinary"}
               onValueChange={(v: boolean) => {
-                if (storage.fallbackExternal !== v) storage.fallbackExternal = v;
+                storage.provider = v ? "cloudinary" : "catbox";
               }}
             />
           }

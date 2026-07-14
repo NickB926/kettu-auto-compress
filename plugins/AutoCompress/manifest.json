@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Oversized media → bare Catbox URL (embeds/taps). v1.8",
+  "description": "Cloudinary compress → Discord native video when possible; Catbox fallback. v1.9",
   "authors": [
     {
       "name": "NickB926",

@@ -8,6 +8,7 @@ import { ensureSettings, maxBytes, MB } from "./config";
 import {
   captureSnapshot,
   uploadExternal,
+  applyLocalToMedia,
   type FileSnapshot,
 } from "./external";
 import {
@@ -130,62 +131,100 @@ async function sendLink(channelId: string | undefined, content: string) {
   }
 }
 
-async function externalFallback(
+function delay(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Compress/host externally. Prefer Cloudinary → local file → Discord attachment
+ * (native video player). Otherwise send a bare media URL.
+ */
+async function tryExternal(
   media: any,
   size: number,
-  snap: FileSnapshot | null
-): Promise<boolean> {
+  snap: FileSnapshot | null,
+  orig: (...a: any[]) => any,
+  args: any[]
+): Promise<{ prepResult: any } | "link" | false> {
   if (!externalEnabled()) {
     toast("External fallback is OFF in AutoCompress settings", true);
     return false;
   }
-
   if (!snap?.uri) {
-    toast("External failed: no local file URI to upload", true);
+    toast("External failed: no local file URI", true);
     return false;
   }
-
-  const channelId = getChannelId(media, snap);
-
-  // Drop Discord's attachment send immediately so the UI isn't stuck on Sending.
-  cancelUpload(media);
-  purgePending(channelId, media);
-  setTimeout(() => purgePending(channelId, media), 250);
-  setTimeout(() => purgePending(channelId, media), 1000);
 
   const settings = ensureSettings();
-  const hash = String(settings.catboxUserhash ?? "").trim();
-  if (!hash) {
+  const provider = settings.provider === "cloudinary" ? "cloudinary" : "catbox";
+  const channelId = getChannelId(media, snap);
+
+  if (provider === "cloudinary") {
+    if (
+      !String(settings.cloudinaryCloudName ?? "").trim() ||
+      !String(settings.cloudinaryUploadPreset ?? "").trim()
+    ) {
+      toast(
+        "Cloudinary not configured — set cloud name + unsigned preset, or switch provider to Catbox",
+        true
+      );
+      return false;
+    }
     toast(
-      "Set your Catbox userhash in AutoCompress settings (catbox.moe account page)",
+      `Compressing ${formatBytes(size) || "video"} via Cloudinary…`,
       true
     );
-    return false;
+  } else {
+    const hash = String(settings.catboxUserhash ?? "").trim();
+    if (!hash) {
+      toast("Set Catbox userhash in AutoCompress settings", true);
+      return false;
+    }
+    toast(`Uploading ${formatBytes(size) || "file"} to Catbox…`, true);
   }
 
-  toast(
-    `Uploading ${formatBytes(size) || "file"} to Catbox (…${hash.slice(-4)})…`,
-    true
+  const result = await uploadExternal(
+    snap,
+    provider,
+    settings.catboxUserhash
   );
 
-  const result = await uploadExternal(snap, "catbox", hash);
-
-  // One more cleanup pass in case Discord recreated a pending bubble.
-  cancelUpload(media);
-  purgePending(channelId, media);
+  // Best: re-inject compressed local file so Discord sends a real video attachment.
+  if (result.localUri) {
+    try {
+      applyLocalToMedia(media, result.localUri, result.localSize);
+      toast(
+        `Re-uploading compressed ${formatBytes(result.localSize || 0) || "file"} to Discord…`,
+        true
+      );
+      const prepResult = await orig(...args);
+      toast("Sent as Discord video", true);
+      return { prepResult };
+    } catch (e) {
+      console.warn("[AutoCompress] Discord re-attach failed:", e);
+      toast("Discord re-attach failed — sending link instead", true);
+    }
+  }
 
   if (!result.link) {
     toast(`External failed: ${result.error ?? "unknown"}`, true);
     return false;
   }
 
-  // Bare URL only — markdown [name](url) kills embeds and often breaks taps on mobile.
+  // Link path: kill Discord's pending send, then post a bare URL.
+  cancelUpload(media);
+  purgePending(channelId, media);
+  setTimeout(() => purgePending(channelId, media), 250);
+  setTimeout(() => purgePending(channelId, media), 1000);
+
+  await delay(700);
   const url = result.link.trim();
   await sendLink(channelId, url);
   purgePending(channelId, media);
-  toast(`Sent Catbox link`, true);
-  return true;
+  toast(`Sent ${result.host || provider} link`, true);
+  return "link";
 }
+
 
 async function handleCompress(
   media: any,
@@ -223,13 +262,18 @@ async function handleCompress(
   if (size > 0 && size <= hardLimit) return orig(...args);
 
   // Oversized: go external FIRST while the URI is still valid.
-  // Discord's built-in compress usually cannot hit free-tier video limits alone.
   if (externalEnabled()) {
-    if (await externalFallback(media, size || snap?.size || 0, snap)) {
-      return null;
+    const outcome = await tryExternal(
+      media,
+      size || snap?.size || 0,
+      snap,
+      orig,
+      args
+    );
+    if (outcome === "link") return null;
+    if (outcome && typeof outcome === "object" && "prepResult" in outcome) {
+      return outcome.prepResult;
     }
-    // External failed — try Discord compress as a last resort.
-    toast("External failed — trying Discord compress…", true);
   }
 
   const kind = video ? "video" : "image";
@@ -246,9 +290,16 @@ async function handleCompress(
       return result.prepResult;
     }
 
-    // Still too big after Discord — try external again with original snapshot.
-    if (await externalFallback(media, size || 0, snap ?? captureSnapshot(media))) {
-      return null;
+    const outcome = await tryExternal(
+      media,
+      size || 0,
+      snap ?? captureSnapshot(media),
+      orig,
+      args
+    );
+    if (outcome === "link") return null;
+    if (outcome && typeof outcome === "object" && "prepResult" in outcome) {
+      return outcome.prepResult;
     }
 
     if (settings.blockOnFail) {
@@ -264,8 +315,17 @@ async function handleCompress(
     return result.prepResult;
   } catch (err) {
     console.error("[AutoCompress] compress failed:", err);
-    if (await externalFallback(media, size || 0, snap ?? captureSnapshot(media)))
-      return null;
+    const outcome = await tryExternal(
+      media,
+      size || 0,
+      snap ?? captureSnapshot(media),
+      orig,
+      args
+    );
+    if (outcome === "link") return null;
+    if (outcome && typeof outcome === "object" && "prepResult" in outcome) {
+      return outcome.prepResult;
+    }
 
     if (settings.blockOnFail) {
       toast("Compression failed — blocked", true);
@@ -350,8 +410,14 @@ export function patchUploader(): () => void {
             // Recover: Discord API rejected after our pipe — try external now.
             if (externalEnabled()) {
               toast("Discord rejected file — recovering via external…", true);
-              externalFallback(self, getUploadSize(self) || snap?.size || 0, snap).catch(
-                (e) => console.warn("[AutoCompress] 40005 recovery failed:", e)
+              tryExternal(
+                self,
+                getUploadSize(self) || snap?.size || 0,
+                snap,
+                async () => null,
+                []
+              ).catch((e) =>
+                console.warn("[AutoCompress] 40005 recovery failed:", e)
               );
             } else {
               toast(
