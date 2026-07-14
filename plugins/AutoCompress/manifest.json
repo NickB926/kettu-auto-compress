@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Oversized videos → Litterbox/Catbox link; clears stuck Sending state. v1.5",
+  "description": "Oversized videos → Litterbox or Catbox (userhash required). v1.6",
   "authors": [
     {
       "name": "NickB926",

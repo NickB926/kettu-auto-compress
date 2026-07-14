@@ -15,6 +15,8 @@ export type PluginConfig = {
    */
   fallbackExternal: boolean;
   externalHost: "litterbox" | "catbox";
+  /** Required for Catbox — anonymous uploads now return "Invalid uploader". */
+  catboxUserhash: string;
 };
 
 const defaults: PluginConfig = {
@@ -26,6 +28,7 @@ const defaults: PluginConfig = {
   debugToasts: false,
   fallbackExternal: true,
   externalHost: "litterbox",
+  catboxUserhash: "",
 };
 
 function coerceMaxMB(raw: unknown): number {
@@ -56,6 +59,8 @@ export function ensureSettings(): PluginConfig {
     storage.fallbackExternal = defaults.fallbackExternal;
   if (storage.externalHost !== "litterbox" && storage.externalHost !== "catbox")
     storage.externalHost = defaults.externalHost;
+  if (typeof storage.catboxUserhash !== "string")
+    storage.catboxUserhash = defaults.catboxUserhash;
 
   return storage as PluginConfig;
 }

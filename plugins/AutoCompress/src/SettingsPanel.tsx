@@ -100,12 +100,24 @@ export default function SettingsPanel() {
             }}
           />
           <TableSwitchRow
-            label="Use Catbox instead of Litterbox"
-            subLabel="Catbox keeps files longer; Litterbox is temporary (12h)"
+            label="Prefer Catbox over Litterbox"
+            subLabel="Needs a Catbox userhash below (anonymous Catbox is blocked)"
             value={storage.externalHost === "catbox"}
             onValueChange={(v: boolean) => {
               storage.externalHost = v ? "catbox" : "litterbox";
             }}
+          />
+          <TableRow
+            label="Catbox userhash"
+            subLabel="catbox.moe → log in → your userhash. Required for Catbox."
+          />
+          <TextInput
+            value={String(storage.catboxUserhash ?? "")}
+            placeholder="paste userhash here"
+            onChange={(v: string) => {
+              storage.catboxUserhash = String(v ?? "").trim();
+            }}
+            isClearable
           />
           <TableSwitchRow
             label="Block send if still too large"

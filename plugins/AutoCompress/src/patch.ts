@@ -162,7 +162,11 @@ async function externalFallback(
     true
   );
 
-  const result = await uploadExternal(snap, preferred);
+  const result = await uploadExternal(
+    snap,
+    preferred,
+    settings.catboxUserhash
+  );
 
   // One more cleanup pass in case Discord recreated a pending bubble.
   cancelUpload(media);

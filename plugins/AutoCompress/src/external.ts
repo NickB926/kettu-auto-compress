@@ -138,7 +138,10 @@ export async function uploadToLitterbox(
   }
 }
 
-export async function uploadToCatbox(mediaOrSnap: any): Promise<UploadResult> {
+export async function uploadToCatbox(
+  mediaOrSnap: any,
+  userhash?: string
+): Promise<UploadResult> {
   const snap: FileSnapshot | null =
     mediaOrSnap?.uri && mediaOrSnap?.filename
       ? mediaOrSnap
@@ -146,17 +149,53 @@ export async function uploadToCatbox(mediaOrSnap: any): Promise<UploadResult> {
 
   if (!snap?.uri) return { link: null, error: "missing file URI" };
 
+  const hash = (userhash ?? "").trim();
+  if (!hash) {
+    return {
+      link: null,
+      error:
+        "Catbox needs a userhash (anonymous uploads are blocked with Invalid uploader). Set it in AutoCompress settings.",
+    };
+  }
+
   try {
     const formData = new FormData();
     formData.append("reqtype", "fileupload");
+    formData.append("userhash", hash);
     formData.append("fileToUpload", buildFilePart(snap));
 
-    const { text, status } = await postForm(
-      "https://catbox.moe/user/api.php",
-      formData
-    );
+    // Prefer fetch for Catbox (matches working mobile plugins); XHR as backup.
+    let text = "";
+    let status = 0;
+    try {
+      const response = await fetch("https://catbox.moe/user/api.php", {
+        method: "POST",
+        body: formData,
+      });
+      text = (await response.text()).trim();
+      status = response.status;
+    } catch {
+      const viaXhr = await xhrPostForm(
+        "https://catbox.moe/user/api.php",
+        formData
+      );
+      text = viaXhr.text.trim();
+      status = viaXhr.status;
+    }
 
-    if (text.startsWith("https://")) return { link: text };
+    if (text.startsWith("https://") || text.startsWith("http://")) {
+      return { link: text };
+    }
+
+    const lower = text.toLowerCase();
+    if (status === 412 || lower.includes("invalid uploader")) {
+      return {
+        link: null,
+        error:
+          "Invalid uploader — check your Catbox userhash (account → settings on catbox.moe)",
+      };
+    }
+
     return {
       link: null,
       error: `Catbox HTTP ${status}: ${text.slice(0, 120) || "empty"}`,
@@ -170,7 +209,8 @@ export async function uploadToCatbox(mediaOrSnap: any): Promise<UploadResult> {
 /** Try preferred host, then the other. */
 export async function uploadExternal(
   snap: FileSnapshot,
-  preferred: "litterbox" | "catbox"
+  preferred: "litterbox" | "catbox",
+  catboxUserhash?: string
 ): Promise<UploadResult & { host: string }> {
   const order =
     preferred === "catbox"
@@ -179,10 +219,19 @@ export async function uploadExternal(
 
   let last: UploadResult = { link: null, error: "no attempt" };
   for (const host of order) {
-    last =
-      host === "catbox"
-        ? await uploadToCatbox(snap)
-        : await uploadToLitterbox(snap, "12h");
+    if (host === "catbox") {
+      // Skip Catbox entirely if no hash — avoids noisy Invalid uploader + wasted attempt.
+      if (!(catboxUserhash ?? "").trim()) {
+        last = {
+          link: null,
+          error: "skipped Catbox (no userhash set)",
+        };
+        continue;
+      }
+      last = await uploadToCatbox(snap, catboxUserhash);
+    } else {
+      last = await uploadToLitterbox(snap, "12h");
+    }
     if (last.link) return { ...last, host };
   }
   return { ...last, host: preferred };
