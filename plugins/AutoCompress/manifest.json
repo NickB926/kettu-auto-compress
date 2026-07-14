@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Compress videos under Discord’s limit; if that fails, send a Litterbox/Catbox link instead. v1.3",
+  "description": "Oversized videos → Litterbox/Catbox link (URI snapshotted before Discord compress). v1.4",
   "authors": [
     {
       "name": "NickB926",

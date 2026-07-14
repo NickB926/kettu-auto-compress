@@ -5,7 +5,11 @@ import { showToast } from "@vendetta/ui/toasts";
 
 import { compressUpload, resolveUploadSize } from "./compress";
 import { ensureSettings, maxBytes, MB } from "./config";
-import { uploadToCatbox, uploadToLitterbox } from "./external";
+import {
+  captureSnapshot,
+  uploadExternal,
+  type FileSnapshot,
+} from "./external";
 import {
   formatBytes,
   getUploadSize,
@@ -13,9 +17,16 @@ import {
   isVideoUpload,
 } from "./utils";
 
+const SNAP_KEY = "__acSnapshot";
+
 function toast(msg: string, force = false) {
   const s = ensureSettings();
   if (force || s.showToasts || s.debugToasts) showToast(msg);
+}
+
+function externalEnabled(): boolean {
+  // Treat anything except explicit false as on (matches default).
+  return ensureSettings().fallbackExternal !== false;
 }
 
 function cancelUpload(media: any) {
@@ -25,6 +36,20 @@ function cancelUpload(media: any) {
     else if (typeof media.removeFromMsgDraft === "function")
       media.removeFromMsgDraft();
   } catch {}
+}
+
+function getChannelId(media?: any, snap?: FileSnapshot | null): string | undefined {
+  if (media?.channelId) return media.channelId;
+  if (snap?.channelId) return snap.channelId;
+  try {
+    return (
+      findByProps("getChannelId", "getCurrentlySelectedChannelId")?.getChannelId?.() ??
+      findByProps("getLastSelectedChannelId")?.getLastSelectedChannelId?.() ??
+      findByProps("getChannelId")?.getChannelId?.()
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function cleanupFailedPending(channelId?: string) {
@@ -44,12 +69,26 @@ function cleanupFailedPending(channelId?: string) {
 async function sendLink(channelId: string | undefined, content: string) {
   const MessageSender = findByProps("sendMessage");
   if (channelId && MessageSender?.sendMessage) {
-    await MessageSender.sendMessage(channelId, { content });
-    return true;
+    try {
+      const nonce = Date.now().toString();
+      await MessageSender.sendMessage(
+        channelId,
+        { content },
+        void 0,
+        { nonce }
+      );
+      return true;
+    } catch (e) {
+      console.warn("[AutoCompress] sendMessage failed:", e);
+      try {
+        await MessageSender.sendMessage(channelId, { content });
+        return true;
+      } catch {}
+    }
   }
   try {
     (ReactNative as any)?.Clipboard?.setString?.(content);
-    toast("Link copied (couldn't send to chat)", true);
+    toast("Link copied (couldn't auto-send — paste it)", true);
     return false;
   } catch {
     toast(content, true);
@@ -57,35 +96,43 @@ async function sendLink(channelId: string | undefined, content: string) {
   }
 }
 
-async function externalFallback(media: any, size: number): Promise<boolean> {
-  const settings = ensureSettings();
-  if (!settings.fallbackExternal) return false;
-
-  const host = settings.externalHost === "catbox" ? "Catbox" : "Litterbox";
-  toast(
-    `Discord won't take ${formatBytes(size)} — uploading to ${host}…`,
-    true
-  );
-
-  const link =
-    settings.externalHost === "catbox"
-      ? await uploadToCatbox(media)
-      : await uploadToLitterbox(media, "12h");
-
-  cancelUpload(media);
-  const channelId =
-    media?.channelId ?? findByProps("getChannelId")?.getChannelId?.();
-  setTimeout(() => cleanupFailedPending(channelId), 400);
-
-  if (!link) {
-    toast(`${host} upload failed`, true);
+async function externalFallback(
+  media: any,
+  size: number,
+  snap: FileSnapshot | null
+): Promise<boolean> {
+  if (!externalEnabled()) {
+    toast("External fallback is OFF in AutoCompress settings", true);
     return false;
   }
 
-  const name = media?.filename ?? media?.item?.filename ?? "file";
-  const content = `[${name}](${link})`;
+  if (!snap?.uri) {
+    toast("External failed: no local file URI to upload", true);
+    return false;
+  }
+
+  const settings = ensureSettings();
+  const preferred = settings.externalHost === "catbox" ? "catbox" : "litterbox";
+  toast(
+    `Discord won't take ${formatBytes(size) || "this file"} — uploading…`,
+    true
+  );
+
+  const result = await uploadExternal(snap, preferred);
+
+  cancelUpload(media);
+  const channelId = getChannelId(media, snap);
+  setTimeout(() => cleanupFailedPending(channelId), 400);
+
+  if (!result.link) {
+    toast(`External failed: ${result.error ?? "unknown"}`, true);
+    return false;
+  }
+
+  const name = snap.filename || "file";
+  const content = `[${name}](${result.link})`;
   await sendLink(channelId, content);
-  toast(`Sent ${host} link`, true);
+  toast(`Sent via ${result.host}`, true);
   return true;
 }
 
@@ -96,22 +143,26 @@ async function handleCompress(
 ) {
   const settings = ensureSettings();
   const limit = maxBytes();
-  // Keep a little headroom under Discord's free tier.
   const hardLimit = Math.min(limit, 24.5 * MB);
   const video = isVideoUpload(media);
   const image = isImageUpload(media);
+
+  // Capture URI BEFORE Discord touches the file (compress often invalidates it).
+  const snap = captureSnapshot(media);
+  try {
+    media[SNAP_KEY] = snap;
+  } catch {}
 
   const cares =
     (settings.compressVideos && video) || (settings.compressImages && image);
 
   let size = await resolveUploadSize(media);
+  if (snap && (!snap.size || snap.size <= 0) && size > 0) snap.size = size;
 
   if (settings.debugToasts) {
     const kind = video ? "video" : image ? "image" : "file";
-    const name =
-      media?.filename ?? media?.item?.filename ?? media?.name ?? "?";
     toast(
-      `AC saw ${kind}: ${name} · ${size ? formatBytes(size) : "size?"} · ≤${settings.maxMB}MB`,
+      `AC ${kind}: ${snap?.filename ?? "?"} · ${size ? formatBytes(size) : "size?"} · uri=${snap?.uri ? "yes" : "NO"}`,
       true
     );
   }
@@ -119,6 +170,16 @@ async function handleCompress(
   if (!cares) return orig(...args);
 
   if (size > 0 && size <= hardLimit) return orig(...args);
+
+  // Oversized: go external FIRST while the URI is still valid.
+  // Discord's built-in compress usually cannot hit free-tier video limits alone.
+  if (externalEnabled()) {
+    if (await externalFallback(media, size || snap?.size || 0, snap)) {
+      return null;
+    }
+    // External failed — try Discord compress as a last resort.
+    toast("External failed — trying Discord compress…", true);
+  }
 
   const kind = video ? "video" : "image";
   toast(
@@ -134,14 +195,14 @@ async function handleCompress(
       return result.prepResult;
     }
 
-    // Discord still too big → external host (works) instead of pointless 40005.
-    if (await externalFallback(media, size || 0)) {
+    // Still too big after Discord — try external again with original snapshot.
+    if (await externalFallback(media, size || 0, snap ?? captureSnapshot(media))) {
       return null;
     }
 
     if (settings.blockOnFail) {
       toast(
-        `Still ${formatBytes(size) || "too big"} — blocked (enable External fallback in settings)`,
+        `Still ${formatBytes(size) || "too big"} — blocked (external upload also failed)`,
         true
       );
       cancelUpload(media);
@@ -152,10 +213,11 @@ async function handleCompress(
     return result.prepResult;
   } catch (err) {
     console.error("[AutoCompress] compress failed:", err);
-    if (await externalFallback(media, size || 0)) return null;
+    if (await externalFallback(media, size || 0, snap ?? captureSnapshot(media)))
+      return null;
 
     if (settings.blockOnFail) {
-      toast("Compression failed — blocked");
+      toast("Compression failed — blocked", true);
       cancelUpload(media);
       return null;
     }
@@ -164,7 +226,6 @@ async function handleCompress(
   }
 }
 
-/** Raise Discord's client-side attachment ceiling so huge videos reach our hook. */
 function patchClientSizeLimits(unpatches: Array<() => void>) {
   const BIG = 500 * MB;
   const propSets = [
@@ -186,12 +247,10 @@ function patchClientSizeLimits(unpatches: Array<() => void>) {
             return BIG;
           })
         );
-        console.log(`[AutoCompress] raised ${key}`);
       }
     } catch {}
   }
 
-  // Some builds expose a Premium / file-size helper object.
   try {
     const premium =
       findByProps("canUseIncreasedAttachmentSize") ||
@@ -230,18 +289,26 @@ export function patchUploader(): () => void {
       );
       hooked = true;
 
-      // If Discord still throws 40005, clean up + explain.
       if (typeof CloudUpload.prototype.handleError === "function") {
         unpatches.push(
           before("handleError", CloudUpload.prototype, function (args) {
-            if (args?.[0] == 40005 || args?.[0] === "40005") {
+            if (args?.[0] != 40005 && args?.[0] !== "40005") return;
+            const self = this;
+            const snap: FileSnapshot | null = self?.[SNAP_KEY] ?? captureSnapshot(self);
+
+            // Recover: Discord API rejected after our pipe — try external now.
+            if (externalEnabled()) {
+              toast("Discord rejected file — recovering via external…", true);
+              externalFallback(self, getUploadSize(self) || snap?.size || 0, snap).catch(
+                (e) => console.warn("[AutoCompress] 40005 recovery failed:", e)
+              );
+            } else {
               toast(
-                "Discord still rejected the file (over limit). Enable External fallback.",
+                "Discord rejected (over limit). Turn ON External fallback in AutoCompress.",
                 true
               );
-              const channelId = this?.channelId;
-              setTimeout(() => cleanupFailedPending(channelId), 300);
             }
+            setTimeout(() => cleanupFailedPending(getChannelId(self, snap)), 300);
           })
         );
       }
@@ -268,6 +335,9 @@ export function patchUploader(): () => void {
           for (const file of files) {
             const media = file?.file ?? file;
             if (!media) continue;
+            try {
+              media[SNAP_KEY] = captureSnapshot(media);
+            } catch {}
             resolveUploadSize(media).catch(() => {});
           }
         })
@@ -283,7 +353,7 @@ export function patchUploader(): () => void {
   } else {
     const s = ensureSettings();
     toast(
-      `AutoCompress ready (≤${s.maxMB}MB${s.fallbackExternal ? " + link fallback" : ""})`,
+      `AutoCompress ready (≤${s.maxMB}MB${externalEnabled() ? " + external" : ""})`,
       true
     );
   }
