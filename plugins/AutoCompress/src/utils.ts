@@ -10,19 +10,27 @@ export function formatBytes(bytes: number, decimals = 1): string {
 }
 
 export function isVideoUpload(media: any): boolean {
-  if (media?.isVideo) return true;
-  const mime = String(media?.mimeType ?? media?.item?.mimeType ?? "").toLowerCase();
+  if (media?.isVideo === true) return true;
+  const mime = String(
+    media?.mimeType ?? media?.item?.mimeType ?? media?.contentType ?? ""
+  ).toLowerCase();
   if (mime.startsWith("video/")) return true;
-  const name = String(media?.filename ?? media?.item?.filename ?? media?.name ?? "").toLowerCase();
-  return /\.(mp4|mov|mkv|webm|avi|m4v|3gp)$/.test(name);
+  const name = String(
+    media?.filename ?? media?.item?.filename ?? media?.name ?? media?.item?.name ?? ""
+  ).toLowerCase();
+  return /\.(mp4|mov|mkv|webm|avi|m4v|3gp|mpeg|mpg)$/.test(name);
 }
 
 export function isImageUpload(media: any): boolean {
-  if (media?.isImage) return true;
-  const mime = String(media?.mimeType ?? media?.item?.mimeType ?? "").toLowerCase();
+  if (media?.isImage === true) return true;
+  const mime = String(
+    media?.mimeType ?? media?.item?.mimeType ?? media?.contentType ?? ""
+  ).toLowerCase();
   if (mime.startsWith("image/")) return true;
-  const name = String(media?.filename ?? media?.item?.filename ?? media?.name ?? "").toLowerCase();
-  return /\.(png|jpe?g|webp|gif|heic|heif)$/.test(name);
+  const name = String(
+    media?.filename ?? media?.item?.filename ?? media?.name ?? media?.item?.name ?? ""
+  ).toLowerCase();
+  return /\.(png|jpe?g|webp|gif|heic|heif|bmp)$/.test(name);
 }
 
 export function getUploadUri(media: any): string | null {
@@ -34,6 +42,7 @@ export function getUploadUri(media: any): string | null {
     media?.path,
     media?.sourceURL,
     media?.item?.file?.uri,
+    media?.file?.uri,
   ];
   for (const c of candidates) {
     if (typeof c === "string" && c.length > 0) return c;
@@ -42,14 +51,23 @@ export function getUploadUri(media: any): string | null {
 }
 
 export function getUploadSize(media: any): number {
-  const n =
-    media?.preCompressionSize ??
-    media?.currentSize ??
-    media?.size ??
-    media?.item?.size ??
-    media?.item?.file?.size ??
-    0;
-  return typeof n === "number" && n > 0 ? n : 0;
+  const candidates = [
+    media?.preCompressionSize,
+    media?.currentSize,
+    media?.postCompressionSize,
+    media?.size,
+    media?.item?.size,
+    media?.item?.file?.size,
+    media?.file?.size,
+  ];
+  for (const n of candidates) {
+    if (typeof n === "number" && n > 0) return n;
+    if (typeof n === "string") {
+      const parsed = parseInt(n, 10);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+  }
+  return 0;
 }
 
 export function applyCompressedUri(
@@ -75,6 +93,5 @@ export function applyCompressedUri(
     }
   }
 
-  // Force Discord to re-prep from the new URI if it tracks this flag.
   if ("reactNativeFilePrepped" in media) media.reactNativeFilePrepped = false;
 }

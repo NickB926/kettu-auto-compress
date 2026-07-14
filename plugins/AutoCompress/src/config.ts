@@ -3,16 +3,13 @@ import { storage } from "@vendetta/plugin";
 export const MB = 1024 * 1024;
 
 export type PluginConfig = {
-  /** Target max upload size in megabytes */
   maxMB: number;
-  /** Compress videos over the limit */
   compressVideos: boolean;
-  /** Also re-run Discord compress for large images */
   compressImages: boolean;
-  /** Cancel the send if still over the limit after compress */
   blockOnFail: boolean;
-  /** Show toasts for progress / results */
   showToasts: boolean;
+  /** Toast every upload the hook sees (helps debug "not working") */
+  debugToasts: boolean;
 };
 
 const defaults: PluginConfig = {
@@ -21,11 +18,22 @@ const defaults: PluginConfig = {
   compressImages: true,
   blockOnFail: true,
   showToasts: true,
+  debugToasts: true,
 };
 
+function coerceMaxMB(raw: unknown): number {
+  if (typeof raw === "number" && raw > 0 && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string") {
+    const n = parseFloat(raw.replace(/[^0-9.]/g, ""));
+    if (!isNaN(n) && n > 0) return n;
+  }
+  return defaults.maxMB;
+}
+
 export function ensureSettings(): PluginConfig {
-  if (typeof storage.maxMB !== "number" || !(storage.maxMB > 0))
-    storage.maxMB = defaults.maxMB;
+  // Normalize maxMB without stomping mid-edit string drafts elsewhere.
+  storage.maxMB = coerceMaxMB(storage.maxMB);
+
   if (typeof storage.compressVideos !== "boolean")
     storage.compressVideos = defaults.compressVideos;
   if (typeof storage.compressImages !== "boolean")
@@ -34,11 +42,12 @@ export function ensureSettings(): PluginConfig {
     storage.blockOnFail = defaults.blockOnFail;
   if (typeof storage.showToasts !== "boolean")
     storage.showToasts = defaults.showToasts;
+  if (typeof storage.debugToasts !== "boolean")
+    storage.debugToasts = defaults.debugToasts;
 
   return storage as PluginConfig;
 }
 
 export function maxBytes(): number {
-  const mb = ensureSettings().maxMB;
-  return Math.max(1, mb) * MB;
+  return Math.max(1, coerceMaxMB(ensureSettings().maxMB)) * MB;
 }

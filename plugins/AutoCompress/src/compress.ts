@@ -15,6 +15,22 @@ function nativeModules(): Record<string, any> {
   return (ReactNative as any)?.NativeModules ?? {};
 }
 
+export async function resolveUploadSize(media: any): Promise<number> {
+  const known = getUploadSize(media);
+  if (known > 0) return known;
+
+  const uri = getUploadUri(media);
+  if (!uri) return 0;
+
+  const sized = await statSize(uri);
+  if (typeof sized === "number" && sized > 0) {
+    media.preCompressionSize = sized;
+    media.currentSize = sized;
+    return sized;
+  }
+  return 0;
+}
+
 /** Probe for optional native video compressors Discord or a loader might expose. */
 export async function tryNativeVideoCompress(
   uri: string,
@@ -23,14 +39,12 @@ export async function tryNativeVideoCompress(
 ): Promise<CompressResult> {
   const mods = nativeModules();
 
-  // Bitrate estimate: leave ~12% headroom under the limit.
   const dur = Math.max(1, durationSecs || 30);
   const targetBits = Math.floor(targetBytes * 0.88 * 8);
   const audioBits = 96_000;
   const videoBitrate = Math.max(150_000, Math.floor(targetBits / dur) - audioBits);
 
   const attempts: Array<() => Promise<CompressResult | null>> = [
-    // Common RN compressor-style bridges (only if a custom APK injected them)
     async () => {
       const Video = mods.VideoCompressor || mods.RNCompressor || mods.Compressor;
       if (!Video?.compress) return null;
@@ -64,7 +78,6 @@ export async function tryNativeVideoCompress(
       return null;
     },
     async () => {
-      // Discord metro modules that sometimes expose media helpers
       const metro =
         findByProps("compressVideo") ||
         findByProps("createCompressedVideo") ||
@@ -90,7 +103,6 @@ export async function tryNativeVideoCompress(
       const res = await attempt();
       if (res?.ok && res.uri) return res;
     } catch (e) {
-      // try next strategy
       console.warn("[AutoCompress] native attempt failed:", e);
     }
   }
@@ -124,8 +136,8 @@ export async function statSize(uri: string): Promise<number | undefined> {
 }
 
 /**
- * Run Discord's built-in RN compress, optionally followed by a native
- * re-encode pass if the result is still over the target size.
+ * Run Discord's built-in RN compress, then optionally a native re-encode
+ * if still over the target size.
  */
 export async function compressUpload(
   media: any,
@@ -136,20 +148,18 @@ export async function compressUpload(
   proceeded: boolean;
   finalSize: number;
   method: string;
-  /** Value to return to Discord's upload pipeline when proceeding */
   prepResult?: any;
+  nativeTried: boolean;
 }> {
-  const before = getUploadSize(media);
+  const before = (await resolveUploadSize(media)) || getUploadSize(media);
   const uri = getUploadUri(media);
 
-  // Always let Discord's own compressor run first — it uses native codecs
-  // and already handles many oversized attachments.
   const discordResult = await originalCompress.apply(media, args);
 
   const afterDiscord =
-    media?.postCompressionSize ??
-    media?.currentSize ??
-    getUploadSize(media) ??
+    getUploadSize(media) ||
+    media?.postCompressionSize ||
+    media?.currentSize ||
     before;
 
   if (afterDiscord > 0 && afterDiscord <= targetBytes) {
@@ -158,10 +168,10 @@ export async function compressUpload(
       finalSize: afterDiscord,
       method: "discord",
       prepResult: discordResult,
+      nativeTried: false,
     };
   }
 
-  // Still too big — try an optional native bridge if one exists.
   if (uri) {
     const native = await tryNativeVideoCompress(
       uri,
@@ -172,7 +182,6 @@ export async function compressUpload(
       const size = native.size ?? (await statSize(native.uri)) ?? afterDiscord;
       applyCompressedUri(media, native.uri, size);
 
-      // Re-run Discord prep against the new file so upload metadata is consistent.
       let prepResult = discordResult;
       try {
         prepResult = await originalCompress.apply(media, args);
@@ -180,24 +189,31 @@ export async function compressUpload(
         console.warn("[AutoCompress] re-prep after native compress failed:", e);
       }
 
-      const finalSize =
-        media?.postCompressionSize ??
-        media?.currentSize ??
-        size;
+      const finalSize = getUploadSize(media) || size;
 
       return {
         proceeded: finalSize <= targetBytes,
         finalSize,
         method: native.method ?? "native",
         prepResult,
+        nativeTried: true,
       };
     }
+
+    return {
+      proceeded: afterDiscord > 0 && afterDiscord <= targetBytes,
+      finalSize: afterDiscord || before,
+      method: "discord",
+      prepResult: discordResult,
+      nativeTried: true,
+    };
   }
 
   return {
-    proceeded: afterDiscord <= targetBytes,
+    proceeded: afterDiscord > 0 && afterDiscord <= targetBytes,
     finalSize: afterDiscord || before,
     method: "discord",
     prepResult: discordResult,
+    nativeTried: false,
   };
 }

@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Best-effort auto-compress videos over 20MB before Discord upload (Kettu/Revenge).",
+  "description": "Best-effort auto-compress videos under your size limit before Discord upload (Kettu/Revenge). v1.1",
   "authors": [
     {
       "name": "NickB926",
