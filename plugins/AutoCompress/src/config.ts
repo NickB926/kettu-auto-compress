@@ -30,9 +30,10 @@ function coerceMaxMB(raw: unknown): number {
   return defaults.maxMB;
 }
 
+/** Only writes storage when a value is actually missing/wrong — safe under useProxy. */
 export function ensureSettings(): PluginConfig {
-  // Normalize maxMB without stomping mid-edit string drafts elsewhere.
-  storage.maxMB = coerceMaxMB(storage.maxMB);
+  const coerced = coerceMaxMB(storage.maxMB);
+  if (storage.maxMB !== coerced) storage.maxMB = coerced;
 
   if (typeof storage.compressVideos !== "boolean")
     storage.compressVideos = defaults.compressVideos;
@@ -49,5 +50,5 @@ export function ensureSettings(): PluginConfig {
 }
 
 export function maxBytes(): number {
-  return Math.max(1, coerceMaxMB(ensureSettings().maxMB)) * MB;
+  return Math.max(1, coerceMaxMB(storage.maxMB ?? defaults.maxMB)) * MB;
 }

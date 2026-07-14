@@ -9,7 +9,6 @@ import { ensureSettings } from "./config";
 const ScrollView =
   ReactNative?.ScrollView ?? findByProps("ScrollView")?.ScrollView ?? ReactNative.View;
 
-// Prefer modern Bunny/Kettu table rows when present; fall back to Forms.
 const Table = findByProps("TableSwitchRow", "TableRowGroup", "TableRow");
 const TextInputMod = findByProps("TextInput");
 const { FormSection, FormInput, FormSwitch, FormRow, FormDivider } = Forms ?? {};
@@ -21,42 +20,53 @@ function parseMB(raw: string): number | null {
 }
 
 export default function SettingsPanel() {
-  ensureSettings();
+  // Init once on mount — never assign storage unconditionally during render.
+  React.useEffect(() => {
+    ensureSettings();
+  }, []);
+
   useProxy(storage);
 
-  // Local draft so backspacing "20" → "" → "25" does NOT snap back to 20.
-  const [draft, setDraft] = React.useState(String(storage.maxMB ?? 20));
+  const [draft, setDraft] = React.useState(() =>
+    String(storage.maxMB ?? 20)
+  );
+  const focused = React.useRef(false);
 
+  // Sync draft from storage only when not editing (avoids render ↔ proxy loops).
   React.useEffect(() => {
-    // Sync when storage changes from outside (e.g. plugin reload defaults).
+    if (focused.current) return;
     setDraft(String(storage.maxMB ?? 20));
   }, [storage.maxMB]);
 
-  const commitDraft = React.useCallback(() => {
+  const commitDraft = () => {
     const n = parseMB(draft);
     if (n == null) {
       setDraft(String(storage.maxMB ?? 20));
       return;
     }
-    storage.maxMB = n;
+    if (storage.maxMB !== n) storage.maxMB = n;
     setDraft(String(n));
-  }, [draft]);
-
-  const onDraftChange = (v: string) => {
-    setDraft(v);
-    const n = parseMB(v);
-    // Only write when the typed value is a real positive number.
-    // Never force 20 while the field is empty / half-typed.
-    if (n != null) storage.maxMB = n;
   };
 
+  const maxInput = (
+    <FormInput
+      title="Max size (MB)"
+      keyboardType="numeric"
+      placeholder="20"
+      value={draft}
+      onChange={(v: string) => setDraft(String(v ?? ""))}
+      onFocus={() => {
+        focused.current = true;
+      }}
+      onBlur={() => {
+        focused.current = false;
+        commitDraft();
+      }}
+    />
+  );
+
   if (Table?.TableRowGroup && TextInputMod?.TextInput) {
-    const {
-      TableRowGroup,
-      TableSwitchRow,
-      TableRow,
-      Stack,
-    } = Table;
+    const { TableRowGroup, TableSwitchRow, TableRow } = Table;
     const { TextInput } = TextInputMod;
 
     return (
@@ -64,14 +74,20 @@ export default function SettingsPanel() {
         <TableRowGroup title="Target size">
           <TableRow
             label="Max size (MB)"
-            subLabel="Type freely — value saves when valid (e.g. 25)"
+            subLabel="Edit freely, then tap away to save"
           />
           <TextInput
             value={draft}
             placeholder="20"
             keyboardType="numeric"
-            onChange={(v: string) => onDraftChange(String(v ?? ""))}
-            onBlur={commitDraft}
+            onChange={(v: string) => setDraft(String(v ?? ""))}
+            onFocus={() => {
+              focused.current = true;
+            }}
+            onBlur={() => {
+              focused.current = false;
+              commitDraft();
+            }}
             isClearable
           />
         </TableRowGroup>
@@ -82,7 +98,7 @@ export default function SettingsPanel() {
             subLabel="Intercept oversized videos before upload"
             value={!!storage.compressVideos}
             onValueChange={(v: boolean) => {
-              storage.compressVideos = v;
+              if (storage.compressVideos !== v) storage.compressVideos = v;
             }}
           />
           <TableSwitchRow
@@ -90,7 +106,7 @@ export default function SettingsPanel() {
             subLabel="Same for oversized images"
             value={!!storage.compressImages}
             onValueChange={(v: boolean) => {
-              storage.compressImages = v;
+              if (storage.compressImages !== v) storage.compressImages = v;
             }}
           />
         </TableRowGroup>
@@ -101,14 +117,14 @@ export default function SettingsPanel() {
             subLabel="Recommended"
             value={!!storage.blockOnFail}
             onValueChange={(v: boolean) => {
-              storage.blockOnFail = v;
+              if (storage.blockOnFail !== v) storage.blockOnFail = v;
             }}
           />
           <TableSwitchRow
             label="Show toasts"
             value={!!storage.showToasts}
             onValueChange={(v: boolean) => {
-              storage.showToasts = v;
+              if (storage.showToasts !== v) storage.showToasts = v;
             }}
           />
           <TableSwitchRow
@@ -116,7 +132,7 @@ export default function SettingsPanel() {
             subLabel="Toast every file the hook sees (turn off once it works)"
             value={!!storage.debugToasts}
             onValueChange={(v: boolean) => {
-              storage.debugToasts = v;
+              if (storage.debugToasts !== v) storage.debugToasts = v;
             }}
           />
         </TableRowGroup>
@@ -127,24 +143,15 @@ export default function SettingsPanel() {
             subLabel="Uses Discord’s native compress. Long/4K clips may still stay over the limit."
           />
         </TableRowGroup>
-        {Stack ? <Stack /> : null}
       </ScrollView>
     );
   }
 
-  // Legacy Forms fallback
   return (
     <ScrollView style={{ flex: 1 }}>
       <FormSection title="Target size">
-        <FormInput
-          title="Max size (MB)"
-          keyboardType="numeric"
-          placeholder="20"
-          value={draft}
-          onChange={(v: string) => onDraftChange(String(v ?? ""))}
-          onBlur={commitDraft}
-        />
-        <FormRow label="Type freely — only saves when the number is valid." />
+        {maxInput}
+        <FormRow label="Edit freely, then tap away to save." />
       </FormSection>
 
       <FormDivider />
@@ -156,7 +163,7 @@ export default function SettingsPanel() {
             <FormSwitch
               value={!!storage.compressVideos}
               onValueChange={(v: boolean) => {
-                storage.compressVideos = v;
+                if (storage.compressVideos !== v) storage.compressVideos = v;
               }}
             />
           }
@@ -167,7 +174,7 @@ export default function SettingsPanel() {
             <FormSwitch
               value={!!storage.compressImages}
               onValueChange={(v: boolean) => {
-                storage.compressImages = v;
+                if (storage.compressImages !== v) storage.compressImages = v;
               }}
             />
           }
@@ -183,7 +190,7 @@ export default function SettingsPanel() {
             <FormSwitch
               value={!!storage.blockOnFail}
               onValueChange={(v: boolean) => {
-                storage.blockOnFail = v;
+                if (storage.blockOnFail !== v) storage.blockOnFail = v;
               }}
             />
           }
@@ -194,7 +201,7 @@ export default function SettingsPanel() {
             <FormSwitch
               value={!!storage.showToasts}
               onValueChange={(v: boolean) => {
-                storage.showToasts = v;
+                if (storage.showToasts !== v) storage.showToasts = v;
               }}
             />
           }
@@ -206,7 +213,7 @@ export default function SettingsPanel() {
             <FormSwitch
               value={!!storage.debugToasts}
               onValueChange={(v: boolean) => {
-                storage.debugToasts = v;
+                if (storage.debugToasts !== v) storage.debugToasts = v;
               }}
             />
           }
