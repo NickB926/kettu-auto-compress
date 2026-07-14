@@ -156,17 +156,21 @@ async function externalFallback(
   setTimeout(() => purgePending(channelId, media), 1000);
 
   const settings = ensureSettings();
-  const preferred = settings.externalHost === "catbox" ? "catbox" : "litterbox";
+  const hash = String(settings.catboxUserhash ?? "").trim();
+  if (!hash) {
+    toast(
+      "Set your Catbox userhash in AutoCompress settings (catbox.moe account page)",
+      true
+    );
+    return false;
+  }
+
   toast(
-    `Uploading ${formatBytes(size) || "file"} to ${preferred}…`,
+    `Uploading ${formatBytes(size) || "file"} to Catbox (…${hash.slice(-4)})…`,
     true
   );
 
-  const result = await uploadExternal(
-    snap,
-    preferred,
-    settings.catboxUserhash
-  );
+  const result = await uploadExternal(snap, "catbox", hash);
 
   // One more cleanup pass in case Discord recreated a pending bubble.
   cancelUpload(media);

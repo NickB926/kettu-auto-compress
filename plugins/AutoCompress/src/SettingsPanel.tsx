@@ -29,12 +29,21 @@ export default function SettingsPanel() {
   const [draft, setDraft] = React.useState(() =>
     String(storage.maxMB ?? 24)
   );
+  const [hashDraft, setHashDraft] = React.useState(() =>
+    String(storage.catboxUserhash ?? "")
+  );
   const focused = React.useRef(false);
+  const hashFocused = React.useRef(false);
 
   React.useEffect(() => {
     if (focused.current) return;
     setDraft(String(storage.maxMB ?? 24));
   }, [storage.maxMB]);
+
+  React.useEffect(() => {
+    if (hashFocused.current) return;
+    setHashDraft(String(storage.catboxUserhash ?? ""));
+  }, [storage.catboxUserhash]);
 
   const commitDraft = () => {
     const n = parseMB(draft);
@@ -44,6 +53,12 @@ export default function SettingsPanel() {
     }
     if (storage.maxMB !== n) storage.maxMB = n;
     setDraft(String(n));
+  };
+
+  const commitHash = () => {
+    const next = String(hashDraft ?? "").trim();
+    storage.catboxUserhash = next;
+    setHashDraft(next);
   };
 
   if (Table?.TableRowGroup && TextInputMod?.TextInput) {
@@ -90,38 +105,43 @@ export default function SettingsPanel() {
           />
         </TableRowGroup>
 
-        <TableRowGroup title="When Discord still rejects it">
+        <TableRowGroup title="Catbox fallback">
           <TableSwitchRow
-            label="External link fallback"
-            subLabel="If it won't shrink under the limit, upload to Litterbox/Catbox and send the link (recommended)"
+            label="Upload to Catbox when over limit"
+            subLabel="Sends a files.catbox.moe link instead of a Discord attachment"
             value={!!storage.fallbackExternal}
             onValueChange={(v: boolean) => {
               if (storage.fallbackExternal !== v) storage.fallbackExternal = v;
             }}
           />
-          <TableSwitchRow
-            label="Prefer Catbox over Litterbox"
-            subLabel="Needs a Catbox userhash below (anonymous Catbox is blocked)"
-            value={storage.externalHost === "catbox"}
-            onValueChange={(v: boolean) => {
-              storage.externalHost = v ? "catbox" : "litterbox";
-            }}
-          />
           <TableRow
-            label="Catbox userhash"
-            subLabel="catbox.moe → log in → your userhash. Required for Catbox."
+            label="Catbox userhash (required)"
+            subLabel="Log into catbox.moe → copy userhash → paste here → tap away to save"
           />
           <TextInput
-            value={String(storage.catboxUserhash ?? "")}
-            placeholder="paste userhash here"
-            onChange={(v: string) => {
-              storage.catboxUserhash = String(v ?? "").trim();
+            value={hashDraft}
+            placeholder="your userhash"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChange={(v: string) => setHashDraft(String(v ?? ""))}
+            onFocus={() => {
+              hashFocused.current = true;
+            }}
+            onBlur={() => {
+              hashFocused.current = false;
+              commitHash();
             }}
             isClearable
           />
+          <TableRow
+            label={
+              String(storage.catboxUserhash ?? "").trim()
+                ? `Saved hash ending …${String(storage.catboxUserhash).trim().slice(-4)}`
+                : "No userhash saved yet"
+            }
+          />
           <TableSwitchRow
-            label="Block send if still too large"
-            subLabel="Only matters when external fallback is off"
+            label="Block send if Catbox fails"
             value={!!storage.blockOnFail}
             onValueChange={(v: boolean) => {
               if (storage.blockOnFail !== v) storage.blockOnFail = v;
@@ -145,39 +165,21 @@ export default function SettingsPanel() {
             }}
           />
         </TableRowGroup>
-
-        <TableRowGroup title="Limits">
-          <TableRow
-            label="Kettu can't ship FFmpeg"
-            subLabel="Discord's native shrink often isn't enough for long videos — external fallback is the reliable path."
-          />
-        </TableRowGroup>
       </ScrollView>
     );
   }
 
   return (
     <ScrollView style={{ flex: 1 }}>
-      <FormSection title="Target size">
+      <FormSection title="Catbox">
         <FormInput
-          title="Max size (MB)"
-          keyboardType="numeric"
-          placeholder="24"
-          value={draft}
-          onChange={(v: string) => setDraft(String(v ?? ""))}
-          onFocus={() => {
-            focused.current = true;
-          }}
-          onBlur={() => {
-            focused.current = false;
-            commitDraft();
-          }}
+          title="Catbox userhash"
+          value={hashDraft}
+          onChange={(v: string) => setHashDraft(String(v ?? ""))}
+          onBlur={commitHash}
         />
-      </FormSection>
-      <FormDivider />
-      <FormSection title="Fallback">
         <FormRow
-          label="External link fallback"
+          label="External fallback"
           trailing={
             <FormSwitch
               value={!!storage.fallbackExternal}
@@ -188,6 +190,7 @@ export default function SettingsPanel() {
           }
         />
       </FormSection>
+      <FormDivider />
     </ScrollView>
   );
 }

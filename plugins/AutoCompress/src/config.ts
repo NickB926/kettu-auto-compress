@@ -9,13 +9,9 @@ export type PluginConfig = {
   blockOnFail: boolean;
   showToasts: boolean;
   debugToasts: boolean;
-  /**
-   * When Discord can't shrink the file under maxMB, upload to Litterbox/Catbox
-   * and send the link instead. This is what actually works on mobile without FFmpeg.
-   */
+  /** Upload oversized media to Catbox and send the link. */
   fallbackExternal: boolean;
-  externalHost: "litterbox" | "catbox";
-  /** Required for Catbox — anonymous uploads now return "Invalid uploader". */
+  /** Catbox account userhash — required (anonymous API is blocked). */
   catboxUserhash: string;
 };
 
@@ -27,7 +23,6 @@ const defaults: PluginConfig = {
   showToasts: true,
   debugToasts: false,
   fallbackExternal: true,
-  externalHost: "litterbox",
   catboxUserhash: "",
 };
 
@@ -57,14 +52,25 @@ export function ensureSettings(): PluginConfig {
     storage.debugToasts = defaults.debugToasts;
   if (typeof storage.fallbackExternal !== "boolean")
     storage.fallbackExternal = defaults.fallbackExternal;
-  if (storage.externalHost !== "litterbox" && storage.externalHost !== "catbox")
-    storage.externalHost = defaults.externalHost;
   if (typeof storage.catboxUserhash !== "string")
     storage.catboxUserhash = defaults.catboxUserhash;
+
+  // Drop legacy litterbox preference if still stored.
+  if (storage.externalHost != null) {
+    try {
+      delete storage.externalHost;
+    } catch {
+      storage.externalHost = undefined;
+    }
+  }
 
   return storage as PluginConfig;
 }
 
 export function maxBytes(): number {
   return Math.max(1, coerceMaxMB(storage.maxMB ?? defaults.maxMB)) * MB;
+}
+
+export function getCatboxUserhash(): string {
+  return String(storage.catboxUserhash ?? "").trim();
 }
