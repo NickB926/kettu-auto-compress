@@ -99,6 +99,153 @@ function filePart(snap: FileSnapshot, filename: string, mime: string) {
 const BROWSER_UA =
   "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
 
+/** ezgif (and Litterbox) tmp URLs die in ~1h — Discord embeds then 404. */
+export function isEphemeralMediaUrl(url: string): boolean {
+  return /ezgif\.com\/tmp\/|s\d+\.ezgif\.com\/tmp\/|litterbox\.catbox\.moe/i.test(
+    url
+  );
+}
+
+function ezgifMirrorUrls(url: string): string[] {
+  const cleaned = cleanHostedUrl(url);
+  if (!cleaned) return [];
+  const urls = [cleaned];
+  try {
+    const u = new URL(cleaned);
+    const name = u.pathname.split("/").pop() || "";
+    if (!name) return urls;
+    for (const host of ["s1.ezgif.com", "s2.ezgif.com", "s3.ezgif.com", "ezgif.com"]) {
+      const alt = `https://${host}/tmp/${name}`;
+      if (!urls.includes(alt)) urls.push(alt);
+    }
+  } catch {}
+  return urls;
+}
+
+async function fetchBlobWithUa(url: string): Promise<{ blob: any; size: number } | null> {
+  try {
+    const viaXhr = await new Promise<{ blob: any; size: number } | null>(
+      (resolve) => {
+        try {
+          const xhr = new XMLHttpRequest();
+          xhr.open("GET", url);
+          xhr.responseType = "blob";
+          xhr.timeout = 300_000;
+          try {
+            xhr.setRequestHeader("User-Agent", BROWSER_UA);
+          } catch {}
+          xhr.onload = () => {
+            if (xhr.status < 200 || xhr.status >= 300) {
+              resolve(null);
+              return;
+            }
+            const blob: any = xhr.response;
+            resolve({
+              blob,
+              size: Number(blob?.size ?? 0),
+            });
+          };
+          xhr.onerror = () => resolve(null);
+          xhr.ontimeout = () => resolve(null);
+          xhr.send();
+        } catch {
+          resolve(null);
+        }
+      }
+    );
+    if (viaXhr?.blob) return viaXhr;
+
+    const res = await fetch(url, {
+      headers: { "User-Agent": BROWSER_UA },
+    } as any);
+    if (!res.ok) return null;
+    const blob: any = await res.blob();
+    return { blob, size: Number(blob?.size ?? 0) };
+  } catch {
+    return null;
+  }
+}
+
+export async function cacheRemoteFile(
+  url: string,
+  filename: string
+): Promise<{ uri: string; size: number } | null> {
+  const candidates = ezgifMirrorUrls(url);
+  for (const candidate of candidates) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const fetched = await fetchBlobWithUa(candidate);
+        if (!fetched?.blob) continue;
+        const { blob, size } = fetched;
+
+        const nestedUri =
+          blob?.data?.uri ||
+          blob?._data?.uri ||
+          blob?.uri ||
+          (typeof blob?.blobId === "string" ? `blob:${blob.blobId}` : null);
+
+        if (typeof nestedUri === "string" && nestedUri.length > 0) {
+          return { uri: nestedUri, size: size || 0 };
+        }
+
+        const mods = (ReactNative as any)?.NativeModules ?? {};
+        const FM =
+          mods.DCDFileManager ||
+          mods.FileManager ||
+          mods.RNFSManager ||
+          mods.NativeFileSystem;
+
+        const base64: string = await new Promise((resolve, reject) => {
+          try {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const result = String(reader.result ?? "");
+              const comma = result.indexOf(",");
+              resolve(comma >= 0 ? result.slice(comma + 1) : result);
+            };
+            reader.onerror = () =>
+              reject(reader.error ?? new Error("FileReader failed"));
+            reader.readAsDataURL(blob);
+          } catch (e) {
+            reject(e);
+          }
+        });
+
+        const safeName =
+          filename.replace(/[^\w.\-]+/g, "_") || `ac_${Date.now()}.mp4`;
+        const cacheRoot =
+          FM?.cacheDirectory ||
+          FM?.CachesDirectoryPath ||
+          FM?.TemporaryDirectoryPath ||
+          "";
+
+        if (typeof FM?.writeFile === "function" && cacheRoot) {
+          const path = `${String(cacheRoot).replace(/\/$/, "")}/${safeName}`;
+          const bare = path.replace(/^file:\/\//, "");
+          await FM.writeFile(bare, base64, "base64");
+          return {
+            uri: path.startsWith("file:") ? path : `file://${bare}`,
+            size,
+          };
+        }
+
+        if (typeof FM?.saveFile === "function") {
+          const path = await FM.saveFile(safeName, base64);
+          if (typeof path === "string" && path) {
+            return {
+              uri: path.startsWith("file:") ? path : `file://${path}`,
+              size,
+            };
+          }
+        }
+      } catch (e) {
+        console.warn("[AutoCompress] cacheRemoteFile attempt failed:", e);
+      }
+    }
+  }
+  return null;
+}
+
 async function postForm(
   url: string,
   formData: FormData,
@@ -182,81 +329,6 @@ async function postForm(
     };
   } catch (e: any) {
     return { text: String(e?.message ?? e), status: 0, url };
-  }
-}
-
-export async function cacheRemoteFile(
-  url: string,
-  filename: string
-): Promise<{ uri: string; size: number } | null> {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const blob: any = await res.blob();
-    const size = Number(blob?.size ?? 0);
-
-    const nestedUri =
-      blob?.data?.uri ||
-      blob?._data?.uri ||
-      blob?.uri ||
-      (typeof blob?.blobId === "string" ? `blob:${blob.blobId}` : null);
-
-    if (typeof nestedUri === "string" && nestedUri.length > 0) {
-      return { uri: nestedUri, size: size || 0 };
-    }
-
-    const mods = (ReactNative as any)?.NativeModules ?? {};
-    const FM =
-      mods.DCDFileManager ||
-      mods.FileManager ||
-      mods.RNFSManager ||
-      mods.NativeFileSystem;
-
-    const base64: string = await new Promise((resolve, reject) => {
-      try {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = String(reader.result ?? "");
-          const comma = result.indexOf(",");
-          resolve(comma >= 0 ? result.slice(comma + 1) : result);
-        };
-        reader.onerror = () =>
-          reject(reader.error ?? new Error("FileReader failed"));
-        reader.readAsDataURL(blob);
-      } catch (e) {
-        reject(e);
-      }
-    });
-
-    const safeName =
-      filename.replace(/[^\w.\-]+/g, "_") || `ac_${Date.now()}.mp4`;
-    const cacheRoot =
-      FM?.cacheDirectory ||
-      FM?.CachesDirectoryPath ||
-      FM?.TemporaryDirectoryPath ||
-      "";
-
-    if (typeof FM?.writeFile === "function" && cacheRoot) {
-      const path = `${String(cacheRoot).replace(/\/$/, "")}/${safeName}`;
-      const bare = path.replace(/^file:\/\//, "");
-      await FM.writeFile(bare, base64, "base64");
-      return { uri: path.startsWith("file:") ? path : `file://${bare}`, size };
-    }
-
-    if (typeof FM?.saveFile === "function") {
-      const path = await FM.saveFile(safeName, base64);
-      if (typeof path === "string" && path) {
-        return {
-          uri: path.startsWith("file:") ? path : `file://${path}`,
-          size,
-        };
-      }
-    }
-
-    return null;
-  } catch (e) {
-    console.warn("[AutoCompress] cacheRemoteFile failed:", e);
-    return null;
   }
 }
 

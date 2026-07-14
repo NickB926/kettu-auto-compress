@@ -9,6 +9,8 @@ import {
   captureSnapshot,
   uploadExternal,
   applyLocalToMedia,
+  cacheRemoteFile,
+  isEphemeralMediaUrl,
   type FileSnapshot,
 } from "./external";
 import {
@@ -136,8 +138,8 @@ function delay(ms: number) {
 }
 
 /**
- * ezgif remux → local file under limit → Discord attachment.
- * Otherwise send the ezgif media URL.
+ * ezgif remux → Discord attachment only.
+ * Never post ezgif/Litterbox URLs — they expire (~1h) and Discord embeds turn into 404s.
  */
 async function tryExternal(
   media: any,
@@ -154,31 +156,68 @@ async function tryExternal(
 
   const channelId = getChannelId(media, snap);
   const result = await uploadExternal(snap);
-
   const limit = maxBytes();
-  const under =
-    !!result.localUri && (!result.localSize || result.localSize <= limit);
 
-  if (under && result.localUri) {
+  async function attachLocal(
+    localUri: string,
+    localSize?: number
+  ): Promise<{ prepResult: any } | false> {
     try {
-      applyLocalToMedia(media, result.localUri, result.localSize);
+      applyLocalToMedia(media, localUri, localSize);
       const prepResult = await orig(...args);
       return { prepResult };
     } catch (e) {
       console.warn("[AutoCompress] Discord re-attach failed:", e);
+      return false;
     }
+  }
+
+  const under =
+    !!result.localUri && (!result.localSize || result.localSize <= limit);
+
+  if (under && result.localUri) {
+    const ok = await attachLocal(result.localUri, result.localSize);
+    if (ok) return ok;
+  }
+
+  // Under-limit remote but cache failed earlier — retry download before giving up.
+  if (
+    result.link &&
+    !result.localUri &&
+    (!result.error || /cache/i.test(result.error))
+  ) {
+    const cached = await cacheRemoteFile(
+      result.link,
+      `ac_ezgif_retry_${Date.now()}.mp4`
+    );
+    if (cached?.uri && (!cached.size || cached.size <= limit)) {
+      const ok = await attachLocal(cached.uri, cached.size || undefined);
+      if (ok) return ok;
+    }
+  }
+
+  // Never send ephemeral ezgif/Litterbox links into chat (embeds → 404 later).
+  if (result.link && isEphemeralMediaUrl(result.link)) {
+    cancelUpload(media);
+    purgePending(channelId, media);
+    toast(
+      "Couldn't attach as Discord video (won't post temp ezgif link — those 404 later)"
+    );
+    return false;
   }
 
   if (!result.link) {
     toast(`ezgif failed: ${result.error ?? "unknown"}`);
+    cancelUpload(media);
+    purgePending(channelId, media);
     return false;
   }
 
+  // Non-ephemeral link only (shouldn't happen with ezgif-only).
   cancelUpload(media);
   purgePending(channelId, media);
   setTimeout(() => purgePending(channelId, media), 250);
   setTimeout(() => purgePending(channelId, media), 1000);
-
   await delay(700);
   await sendLink(channelId, result.link.trim());
   purgePending(channelId, media);
