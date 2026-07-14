@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Oversized videos → Litterbox/Catbox link (URI snapshotted before Discord compress). v1.4",
+  "description": "Oversized videos → Litterbox/Catbox link; clears stuck Sending state. v1.5",
   "authors": [
     {
       "name": "NickB926",

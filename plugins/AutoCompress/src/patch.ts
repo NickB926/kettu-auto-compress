@@ -31,10 +31,18 @@ function externalEnabled(): boolean {
 
 function cancelUpload(media: any) {
   try {
-    if (typeof media.setStatus === "function") media.setStatus("CANCELED");
-    else if (typeof media.cancel === "function") media.cancel();
-    else if (typeof media.removeFromMsgDraft === "function")
-      media.removeFromMsgDraft();
+    // Discord uses British spelling; some forks used the US spelling.
+    if (typeof media.setStatus === "function") {
+      try {
+        media.setStatus("CANCELLED");
+      } catch {}
+      try {
+        media.setStatus("CANCELED");
+      } catch {}
+    }
+    if (typeof media.cancel === "function") media.cancel();
+    if (typeof media.removeFromMsgDraft === "function") media.removeFromMsgDraft();
+    if (typeof media.delete === "function") media.delete();
   } catch {}
 }
 
@@ -52,19 +60,47 @@ function getChannelId(media?: any, snap?: FileSnapshot | null): string | undefin
   }
 }
 
-function cleanupFailedPending(channelId?: string) {
+/** Clear Discord's stuck "Sending…" bubble after we hijack the upload. */
+function purgePending(channelId?: string, media?: any) {
   if (!channelId) return;
   try {
     const Pending = findByProps("getPendingMessages", "deletePendingMessage");
-    const pending = Pending?.getPendingMessages?.(channelId);
+    if (!Pending?.getPendingMessages || !Pending?.deletePendingMessage) return;
+
+    const pending = Pending.getPendingMessages(channelId);
     if (!pending) return;
+
+    const targetId =
+      media?.messageId ?? media?.id ?? media?.nonce ?? media?.uniqueId;
+
     for (const [id, message] of Object.entries(pending) as [string, any][]) {
-      if (message?.state === "FAILED") {
-        Pending.deletePendingMessage(channelId, id);
+      const state = String(message?.state ?? "").toUpperCase();
+      const hasAttach =
+        !!message?.message?.attachments?.length ||
+        !!message?.attachments?.length ||
+        !!message?.uploads?.length ||
+        !!message?.files?.length;
+
+      const matchTarget = targetId && String(id) === String(targetId);
+      const stuck =
+        state.includes("SEND") ||
+        state.includes("FAIL") ||
+        state.includes("UPLOAD") ||
+        state.includes("PENDING") ||
+        state === "0" ||
+        state === "1";
+
+      if (matchTarget || (stuck && hasAttach) || stuck) {
+        try {
+          Pending.deletePendingMessage(channelId, id);
+        } catch {}
       }
     }
-  } catch {}
+  } catch (e) {
+    console.warn("[AutoCompress] purgePending failed:", e);
+  }
 }
+
 
 async function sendLink(channelId: string | undefined, content: string) {
   const MessageSender = findByProps("sendMessage");
@@ -111,18 +147,26 @@ async function externalFallback(
     return false;
   }
 
+  const channelId = getChannelId(media, snap);
+
+  // Drop Discord's attachment send immediately so the UI isn't stuck on Sending.
+  cancelUpload(media);
+  purgePending(channelId, media);
+  setTimeout(() => purgePending(channelId, media), 250);
+  setTimeout(() => purgePending(channelId, media), 1000);
+
   const settings = ensureSettings();
   const preferred = settings.externalHost === "catbox" ? "catbox" : "litterbox";
   toast(
-    `Discord won't take ${formatBytes(size) || "this file"} — uploading…`,
+    `Uploading ${formatBytes(size) || "file"} to ${preferred}…`,
     true
   );
 
   const result = await uploadExternal(snap, preferred);
 
+  // One more cleanup pass in case Discord recreated a pending bubble.
   cancelUpload(media);
-  const channelId = getChannelId(media, snap);
-  setTimeout(() => cleanupFailedPending(channelId), 400);
+  purgePending(channelId, media);
 
   if (!result.link) {
     toast(`External failed: ${result.error ?? "unknown"}`, true);
@@ -132,6 +176,7 @@ async function externalFallback(
   const name = snap.filename || "file";
   const content = `[${name}](${result.link})`;
   await sendLink(channelId, content);
+  purgePending(channelId, media);
   toast(`Sent via ${result.host}`, true);
   return true;
 }
@@ -308,7 +353,7 @@ export function patchUploader(): () => void {
                 true
               );
             }
-            setTimeout(() => cleanupFailedPending(getChannelId(self, snap)), 300);
+            setTimeout(() => purgePending(getChannelId(self, snap), self), 300);
           })
         );
       }

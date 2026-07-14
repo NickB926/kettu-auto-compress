@@ -66,7 +66,7 @@ function xhrPostForm(
       xhr.ontimeout = () => {
         resolve({ ok: false, text: "timeout", status: 0 });
       };
-      xhr.timeout = 10 * 60 * 1000;
+      xhr.timeout = 90 * 1000; // fail in 90s instead of hanging on Sending forever
       xhr.send(formData as any);
     } catch (e: any) {
       resolve({ ok: false, text: String(e?.message ?? e), status: 0 });
