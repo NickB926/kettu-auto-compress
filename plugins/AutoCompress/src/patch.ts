@@ -10,7 +10,6 @@ import {
   uploadExternal,
   applyLocalToMedia,
   cacheRemoteFile,
-  isEphemeralMediaUrl,
   type FileSnapshot,
 } from "./external";
 import {
@@ -138,8 +137,8 @@ function delay(ms: number) {
 }
 
 /**
- * ezgif remux → Discord attachment only.
- * Never post ezgif/Litterbox URLs — they expire (~1h) and Discord embeds turn into 404s.
+ * ezgif remux → Discord attachment when possible.
+ * Fallback: post the compressed media URL (ezgif tmp links expire ~1h).
  */
 async function tryExternal(
   media: any,
@@ -180,12 +179,8 @@ async function tryExternal(
     if (ok) return ok;
   }
 
-  // Under-limit remote but cache failed earlier — retry download before giving up.
-  if (
-    result.link &&
-    !result.localUri &&
-    (!result.error || /cache/i.test(result.error))
-  ) {
+  // Under-limit remote but cache failed earlier — retry download before link fallback.
+  if (result.link && !result.localUri) {
     const cached = await cacheRemoteFile(
       result.link,
       `ac_ezgif_retry_${Date.now()}.mp4`
@@ -196,16 +191,6 @@ async function tryExternal(
     }
   }
 
-  // Never send ephemeral ezgif/Litterbox links into chat (embeds → 404 later).
-  if (result.link && isEphemeralMediaUrl(result.link)) {
-    cancelUpload(media);
-    purgePending(channelId, media);
-    toast(
-      "Couldn't attach as Discord video (won't post temp ezgif link — those 404 later)"
-    );
-    return false;
-  }
-
   if (!result.link) {
     toast(`ezgif failed: ${result.error ?? "unknown"}`);
     cancelUpload(media);
@@ -213,7 +198,7 @@ async function tryExternal(
     return false;
   }
 
-  // Non-ephemeral link only (shouldn't happen with ezgif-only).
+  // Link fallback (ezgif tmp URLs expire ~1h — prefer Discord attach above).
   cancelUpload(media);
   purgePending(channelId, media);
   setTimeout(() => purgePending(channelId, media), 250);

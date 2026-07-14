@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "ezgif → Discord video only (no temp links that 404). v2.7",
+  "description": "ezgif compress → Discord video, or ezgif link fallback. v2.8",
   "authors": [
     {
       "name": "NickB926",
