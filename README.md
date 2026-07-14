@@ -2,7 +2,7 @@
 
 Best-effort plugin that keeps Discord mobile video (and optional image) uploads under a size limit (**default 24MB**).
 
-If Discord’s own compressor still can’t get the file under the limit (common without FFmpeg), **v1.3+** uploads to **Litterbox/Catbox** and sends a link instead — that’s what actually works day-to-day on Kettu.
+When Discord’s own compressor can’t get under the limit (no FFmpeg in stock Revenge/Kettu), the plugin uses a **website-style remux** service (like ezgif / FreeConvert), downloads the result, and **re-attaches it as a normal Discord video** when possible.
 
 ## Install on your phone
 
@@ -15,32 +15,23 @@ https://nickb926.github.io/kettu-auto-compress/AutoCompress
 ```
 
 4. Enable **AutoCompress**
-5. Attach a video over 20MB and watch for compress toasts
+5. In plugin settings, leave provider on **ezgif** (no account), or set FreeConvert / Cloudinary / Catbox
+6. Attach a video over ~20MB and watch for compress toasts
 
-If install fails, wait a minute after a new push (GitHub Pages needs to finish deploying), then try again.
+If install fails, wait a minute after a new push (GitHub Pages needs to finish deploying), then **Refetch**.
 
-## What it does
+## Providers
 
-1. Hooks `CloudUpload.reactNativeCompressAndExtractData`
-2. If a video (or optionally image) is over the limit:
-   - Shows a toast
-   - Runs Discord’s built-in native compressor
-   - Probes optional native compress bridges if present
-   - **Blocks the send** if still over the limit (default)
+| Provider | Account? | Result |
+|----------|----------|--------|
+| **ezgif** (default) | No | Compress via ezgif.com form → prefer Discord native video |
+| **FreeConvert** | API key | Official compress API → prefer Discord native video |
+| **Cloudinary** | Free unsigned preset | Remote transform → prefer Discord native video |
+| **Catbox** | Userhash | Link only (often weak embeds) |
 
 ## What it is not
 
-Pure Kettu plugins cannot ship FFmpeg. This is not desktop Vencord AutoCompress. Long / high-bitrate clips may still fail to land under 20MB.
-
-## Settings
-
-| Setting | Default | Notes |
-|--------|---------|--------|
-| Max size (MB) | `20` | Raise toward `25` if your account allows it |
-| Videos | on | Main use case |
-| Images | on | Discord compress + block-on-fail |
-| Block send if still too large | on | Safer than a doomed upload |
-| Show toasts | on | Progress / results |
+Pure Kettu plugins cannot ship FFmpeg. This is not desktop Vencord AutoCompress. ezgif is **unofficial form automation** (same as their website); it can break if their HTML changes.
 
 ## Develop locally
 

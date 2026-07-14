@@ -136,8 +136,8 @@ function delay(ms: number) {
 }
 
 /**
- * Compress/host externally. Prefer Cloudinary → local file → Discord attachment
- * (native video player). Otherwise send a bare media URL.
+ * Compress/host externally. Prefer remux providers → local file → Discord
+ * attachment (native video player). Otherwise send a bare media URL.
  */
 async function tryExternal(
   media: any,
@@ -156,7 +156,7 @@ async function tryExternal(
   }
 
   const settings = ensureSettings();
-  const provider = settings.provider === "cloudinary" ? "cloudinary" : "catbox";
+  const provider = settings.provider || "ezgif";
   const channelId = getChannelId(media, snap);
 
   if (provider === "cloudinary") {
@@ -165,29 +165,38 @@ async function tryExternal(
       !String(settings.cloudinaryUploadPreset ?? "").trim()
     ) {
       toast(
-        "Cloudinary not configured — set cloud name + unsigned preset, or switch provider to Catbox",
+        "Cloudinary not configured — set cloud name + unsigned preset, or switch to ezgif",
         true
       );
       return false;
     }
-    toast(
-      `Compressing ${formatBytes(size) || "video"} via Cloudinary…`,
-      true
-    );
-  } else {
-    const hash = String(settings.catboxUserhash ?? "").trim();
-    if (!hash) {
+  } else if (provider === "freeconvert") {
+    if (!String(settings.freeConvertApiKey ?? "").trim()) {
+      toast("Set FreeConvert API key in AutoCompress settings", true);
+      return false;
+    }
+  } else if (provider === "catbox") {
+    if (!String(settings.catboxUserhash ?? "").trim()) {
       toast("Set Catbox userhash in AutoCompress settings", true);
       return false;
     }
-    toast(`Uploading ${formatBytes(size) || "file"} to Catbox…`, true);
   }
 
-  const result = await uploadExternal(
-    snap,
-    provider,
-    settings.catboxUserhash
-  );
+  const sizeLabel = formatBytes(size) || "video";
+  if (provider === "ezgif") {
+    toast(`Compressing ${sizeLabel} via ezgif…`, true);
+  } else if (provider === "freeconvert") {
+    toast(`Compressing ${sizeLabel} via FreeConvert…`, true);
+  } else if (provider === "cloudinary") {
+    toast(`Compressing ${sizeLabel} via Cloudinary…`, true);
+  } else {
+    toast(`Uploading ${sizeLabel} to Catbox…`, true);
+  }
+
+  const result = await uploadExternal(snap, provider, {
+    catboxUserhash: settings.catboxUserhash,
+    freeConvertApiKey: settings.freeConvertApiKey,
+  });
 
   // Best: re-inject compressed local file so Discord sends a real video attachment.
   if (result.localUri) {

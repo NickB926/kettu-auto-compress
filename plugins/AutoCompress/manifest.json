@@ -1,6 +1,6 @@
 {
   "name": "AutoCompress",
-  "description": "Cloudinary compress → Discord native video when possible; Catbox fallback. v1.9",
+  "description": "ezgif/FreeConvert/Cloudinary remux → Discord native video when possible. v2.0",
   "authors": [
     {
       "name": "NickB926",

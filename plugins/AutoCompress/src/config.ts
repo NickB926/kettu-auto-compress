@@ -2,6 +2,12 @@ import { storage } from "@vendetta/plugin";
 
 export const MB = 1024 * 1024;
 
+export type Provider =
+  | "ezgif"
+  | "freeconvert"
+  | "cloudinary"
+  | "catbox";
+
 export type PluginConfig = {
   maxMB: number;
   compressVideos: boolean;
@@ -10,12 +16,23 @@ export type PluginConfig = {
   showToasts: boolean;
   debugToasts: boolean;
   fallbackExternal: boolean;
-  /** catbox = link only; cloudinary = compress then prefer Discord attachment */
-  provider: "catbox" | "cloudinary";
+  /**
+   * ezgif / freeconvert / cloudinary: remote compress → prefer Discord attachment
+   * catbox: link only
+   */
+  provider: Provider;
   catboxUserhash: string;
+  freeConvertApiKey: string;
   cloudinaryCloudName: string;
   cloudinaryUploadPreset: string;
 };
+
+const PROVIDERS: Provider[] = [
+  "ezgif",
+  "freeconvert",
+  "cloudinary",
+  "catbox",
+];
 
 const defaults: PluginConfig = {
   maxMB: 24,
@@ -25,8 +42,9 @@ const defaults: PluginConfig = {
   showToasts: true,
   debugToasts: false,
   fallbackExternal: true,
-  provider: "catbox",
+  provider: "ezgif",
   catboxUserhash: "",
+  freeConvertApiKey: "",
   cloudinaryCloudName: "",
   cloudinaryUploadPreset: "",
 };
@@ -57,16 +75,17 @@ export function ensureSettings(): PluginConfig {
   if (typeof storage.fallbackExternal !== "boolean")
     storage.fallbackExternal = defaults.fallbackExternal;
 
-  if (storage.provider !== "catbox" && storage.provider !== "cloudinary") {
-    // Prefer Cloudinary when credentials already exist.
+  if (!PROVIDERS.includes(storage.provider as Provider)) {
     const hasCl =
       String(storage.cloudinaryCloudName ?? "").trim() &&
       String(storage.cloudinaryUploadPreset ?? "").trim();
-    storage.provider = hasCl ? "cloudinary" : "catbox";
+    storage.provider = hasCl ? "cloudinary" : defaults.provider;
   }
 
   if (typeof storage.catboxUserhash !== "string")
     storage.catboxUserhash = defaults.catboxUserhash;
+  if (typeof storage.freeConvertApiKey !== "string")
+    storage.freeConvertApiKey = defaults.freeConvertApiKey;
   if (typeof storage.cloudinaryCloudName !== "string")
     storage.cloudinaryCloudName = defaults.cloudinaryCloudName;
   if (typeof storage.cloudinaryUploadPreset !== "string")
@@ -97,4 +116,8 @@ export function getCloudinaryConfig(): {
   const uploadPreset = String(storage.cloudinaryUploadPreset ?? "").trim();
   if (!cloudName || !uploadPreset) return null;
   return { cloudName, uploadPreset };
+}
+
+export function getFreeConvertApiKey(): string {
+  return String(storage.freeConvertApiKey ?? "").trim();
 }
